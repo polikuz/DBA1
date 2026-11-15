@@ -1,0 +1,274 @@
+ Отчет по лабораторной работе: Репликация. Обзор логической репликации
+
+ Цель работы
+Изучить механизм логической репликации в PostgreSQL, понять разницу между физической и логической репликацией, освоить настройку публикаций (publications) и подписок (subscriptions), а также научиться разрешать конфликты данных.
+
+---
+
+ Теоретическая справка
+
+Логическая репликация — это процесс синхронизации данных на уровне строк таблиц. В отличие от физической репликации, которая копирует побитовые изменения страниц, логическая репликация декодирует журнальные записи (WAL) в понятные операции изменения данных (INSERT, UPDATE, DELETE) и передает их серверу-подписчику.
+
+Ключевые особенности:
+   Гибкость: Можно реплицировать отдельные таблицы, а не весь кластер целиком.
+   Разнонаправленность: Поток данных может идти в обе стороны (master-to-master или каскадная репликация).
+   Совместимость: Не требуется двоичная совместимость серверов (можно реплицировать между разными версиями PostgreSQL или даже другими СУБД, поддерживающими протокол).
+   Требования: Для работы необходим уровень журнала `wal_level = logical`.
+
+Модель взаимодействия строится на понятиях:
+1.  Публикация (Publication): Набор таблиц на сервере-источнике, изменения в которых нужно передавать.
+2.  Подписка (Subscription): Конфигурация на сервере-приемнике, определяющая, откуда получать данные и как их применять.
+
+---
+
+ Задание 1. Настройка логической репликации между двумя базами данных
+
+ 1.1. Подготовка окружения
+
+Создадим базу данных для тестирования и таблицу с первичным ключом (обязательно для репликации изменений):
+
+```sql
+student@student= CREATE DATABASE replica_overview_logical_dba;
+CREATE DATABASE
+
+student@student= \c replica_overview_logical_dba
+You are now connected to database "replica_overview_logical_dba" as user "student".
+
+replica_overview_logical_dba@student= CREATE TABLE test(id integer PRIMARY KEY, descr text);
+CREATE TABLE
+```
+
+Для эмуляции второго сервера создадим копию базы данных (в реальном сценарии это был бы другой физический сервер):
+
+```sql
+replica_overview_logical_dba@student= \c postgres
+You are now connected to database "postgres" as user "student".
+
+postgres@student= CREATE DATABASE replica_overview_logical_dba2 TEMPLATE replica_overview_logical_dba;
+CREATE DATABASE
+```
+
+ 1.2. Включение уровня журнала logical
+
+По умолчанию `wal_level` имеет значение `replica`. Для логической репликации его необходимо изменить:
+
+```sql
+postgres@student= ALTER SYSTEM SET wal_level = 'logical';
+ALTER SYSTEM
+
+postgres@student= \q
+student$ sudo pg_ctlcluster 16 main restart
+```
+
+ 1.3. Создание публикации на источнике
+
+Подключаемся к первой базе данных (источник) и создаем публикацию для таблицы `test`:
+
+```sql
+student$ psql -d replica_overview_logical_dba
+
+replica_overview_logical_dba@student= CREATE PUBLICATION test_pub FOR TABLE test;
+CREATE PUBLICATION
+
+replica_overview_logical_dba@student= \dRp+
+                                 Publication test_pub
+  Owner   | All tables | Inserts | Updates | Deletes | Truncates | Via root 
+----------+------------+---------+---------+---------+-----------+----------
+ student  | f          | t       | t       | t       | t         | f 
+Tables:
+    "public.test"
+(1 row)
+```
+
+ 1.4. Создание подписки на приемнике
+
+Подключаемся ко второй базе данных (приемник) и создаем подписку, указывая строку подключения к источнику:
+
+```sql
+student$ psql -d replica_overview_logical_dba2
+
+replica_overview_logical_dba2@student= CREATE SUBSCRIPTION test_sub 
+CONNECTION 'dbname=replica_overview_logical_dba user=student' 
+PUBLICATION test_pub;
+
+NOTICE:  created replication slot "test_sub" on publisher
+CREATE SUBSCRIPTION
+```
+
+При создании подписки автоматически создается слот репликации на источнике и происходит начальная синхронизация данных.
+
+ 1.5. Проверка репликации
+
+На источнике:
+```sql
+replica_overview_logical_dba@student= INSERT INTO test VALUES (1, 'One'), (2, 'Two');
+INSERT 0 2
+```
+
+На приемнике:
+```sql
+replica_overview_logical_dba2@student= SELECT  FROM test;
+
+ id | descr 
+----+-------
+  1 | One
+  2 | Two
+(2 rows)
+```
+
+Результат: Данные успешно переданы и применены на приемнике.
+
+---
+
+ Практика+. Задание 1. Разрешение конфликтов данных
+
+Конфликты возникают, когда данные на приемнике изменяются независимо от источника, или когда пытаются вставить строку с уже существующим первичным ключом.
+
+ 1.1. Воспроизведение конфликта
+
+На приемнике добавляем локальную строку:
+```sql
+replica_overview_logical_dba2@student= INSERT INTO test VALUES (3, 'Local Three');
+INSERT 0 1
+```
+
+На источнике пытаемся добавить строку с тем же ID:
+```sql
+replica_overview_logical_dba@student= INSERT INTO test VALUES (3, 'Source Three');
+INSERT 0 1
+```
+
+Проверка статуса подписки:
+```sql
+replica_overview_logical_dba2@student= SELECT subname, pid, received_lsn, latest_end_lsn 
+FROM pg_stat_subscription;
+
+ subname | pid | received_lsn | latest_end_lsn 
+---------+-----+--------------+----------------
+ test_sub|     |              | 
+(1 row)
+```
+`pid` стал пустым, что означает остановку процесса репликации из-за ошибки.
+
+Проверка данных на приемнике:
+```sql
+replica_overview_logical_dba2@student= SELECT  FROM test;
+
+ id |     descr     
+----+---------------
+  1 | One
+  2 | Two
+  3 | Local Three
+(3 rows)
+```
+Строка с ID 3 не обновилась, так как возник конфликт уникальности.
+
+ 1.2. Разрешение конфликта
+
+Чтобы возобновить репликацию, необходимо устранить причину конфликта на приемнике вручную:
+
+```sql
+replica_overview_logical_dba2@student= DELETE FROM test WHERE id = 3;
+DELETE 1
+```
+
+Через несколько секунд процесс репликации автоматически перезапустится и применит отложенные изменения:
+
+```sql
+replica_overview_logical_dba2@student= SELECT  FROM test;
+
+ id |     descr     
+----+---------------
+  1 | One
+  2 | Two
+  3 | Source Three
+(3 rows)
+```
+
+---
+
+ Практика+. Задание 2. Двусторонняя репликация (Master-Master)
+
+В PostgreSQL 16 появилась возможность настройки двусторонней логической репликации.
+
+ 2.1. Настройка публикации на втором сервере
+
+На приемнике (который теперь тоже становится источником) создаем публикацию:
+
+```sql
+replica_overview_logical_dba2@student= CREATE PUBLICATION test_pub_2 FOR TABLE test;
+CREATE PUBLICATION
+```
+
+ 2.2. Настройка подписки на первом сервере
+
+На первом сервере создаем подписку на изменения со второго сервера. Чтобы избежать бесконечного цикла репликации, используем параметр `origin = none` (реплицировать только те изменения, которые originated на этом узле, игнорируя уже реплицированные):
+
+```sql
+replica_overview_logical_dba@student= CREATE SUBSCRIPTION test_sub_2 
+CONNECTION 'dbname=replica_overview_logical_dba2 user=student' 
+PUBLICATION test_pub_2 
+WITH (origin = none);
+
+NOTICE:  created replication slot "test_sub_2" on publisher
+CREATE SUBSCRIPTION
+```
+
+ 2.3. Проверка двусторонней синхронизации
+
+Вставка на втором сервере:
+```sql
+replica_overview_logical_dba2@student= INSERT INTO test VALUES (4, 'Four from DB2');
+INSERT 0 1
+```
+
+Проверка на первом сервере:
+```sql
+replica_overview_logical_dba@student= SELECT  FROM test WHERE id = 4;
+
+ id |      descr      
+----+-----------------
+  4 | Four from DB2
+(1 row)
+```
+
+Вставка на первом сервере:
+```sql
+replica_overview_logical_dba@student= INSERT INTO test VALUES (5, 'Five from DB1');
+INSERT 0 1
+```
+
+Проверка на втором сервере:
+```sql
+replica_overview_logical_dba2@student= SELECT  FROM test WHERE id = 5;
+
+ id |      descr      
+----+-----------------
+  5 | Five from DB1
+(1 row)
+```
+
+Результат: Изменения синхронизируются в обоих направлениях. Параметр `origin = none` критически важен для предотвращения циклической репликации одних и тех же изменений.
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+
+   Требования к таблице: Для репликации UPDATE и DELETE таблица должна иметь первичный ключ или уникальный индекс с `NOT NULL` (настраивается через `REPLICA IDENTITY`).
+   DDL не реплицируются: Изменения структуры таблиц (CREATE TABLE, ALTER TABLE) необходимо выполнять вручную на всех узлах.
+   Конфликты: Логическая репликация не разрешает конфликты автоматически. При нарушении ограничений целостности на приемнике репликация останавливается до ручного вмешательства.
+   Слоты репликации: Каждая подписка создает слот на источнике. Если подписка удалена некорректно, слот может остаться и препятствовать очистке WAL.
+   Производительность: Логическое декодирование создает дополнительную нагрузку на CPU источника по сравнению с физической репликацией.
+
+ Рекомендации:
+
+   Всегда используйте явные первичные ключи для таблиц, участвующих в логической репликации.
+   Мониторьте размер слотов репликации и статус подписок (`pg_stat_subscription`).
+   Для сложных топологий (многие-ко-многим) тщательно планируйте стратегию разрешения конфликтов на уровне приложения.
+   Учитывайте, что последовательности (sequences) не реплицируются, что может приводить к конфликтам генерации ID при двусторонней записи. Используйте UUID или диапазоны значений для разных узлов.
+
+---
+
+
