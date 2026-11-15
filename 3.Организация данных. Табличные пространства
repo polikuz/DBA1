@@ -1,0 +1,408 @@
+ Отчет по лабораторной работе: Организация данных. Табличные пространства
+
+ Цель работы
+Изучить механизм табличных пространств (ТП) в PostgreSQL, понять связь логического и физического хранения данных, научиться создавать и удалять ТП, назначать их по умолчанию для баз данных, а также настраивать параметры планировщика на уровне табличных пространств.
+
+---
+
+ Теоретическая справка
+
+Табличное пространство — это объект кластера, который определяет расположение данных в файловой системе (по сути, указатель на каталог).
+
+Ключевые особенности:
+- Логическое (базы данных, схемы) и физическое (табличные пространства) разделение данных независимы
+- Одно ТП может использоваться разными базами данных, а одна база может хранить данные в нескольких ТП
+- При инициализации кластера создаются два ТП: `pg_default` (по умолчанию) и `pg_global` (общие объекты кластера)
+- Стандартные ТП всегда находятся в `PGDATA/global/` и `PGDATA/base/`
+- Для пользовательского ТП создается символическая ссылка в `PGDATA/pg_tblspc/`
+
+Типичный сценарий применения: одно ТП на медленных дисках для архивных данных, другое — на быстрых SSD для активной работы.
+
+---
+
+ Задание 0. Проверка системных табличных пространств
+
+ 0.1. Список ТП в кластере
+
+```sql
+student@student= SELECT  FROM pg_tablespace;
+
+  oid  |  spcname   | spcowner | spcacl | spcoptions 
+-------+------------+----------+--------+------------
+  1663 | pg_default |       10 |        | 
+  1664 | pg_global  |       10 |        | 
+(2 rows)
+```
+
+Результат: В кластере присутствуют два системных табличных пространства:
+- `pg_global` — общие объекты системного каталога всего кластера
+- `pg_default` — табличное пространство по умолчанию
+
+ 0.2. Проверка ТП по умолчанию для template1
+
+```sql
+student@student= \x \l+ template1 \x
+
+Expanded display is on.
+-[ RECORD 1 ]-------+----------------------------------
+Name                | template1
+Owner               | postgres
+Encoding            | UTF8
+Locale Provider     | libc
+Collate             | en_US.UTF-8
+Ctype               | en_US.UTF-8
+Access privileges   | =c/postgres                      +
+                    | postgres=CTc/postgres
+Size                | 7516 kB
+Tablespace          | pg_default
+Description         | default template for new databases
+
+Expanded display is off.
+```
+
+Ответ на вопрос задания: Новые базы данных создаются копированием `template1`, поэтому они получают то же табличное пространство, что установлено для `template1`, то есть `pg_default`.
+
+---
+
+ Задание 1. Создание нового табличного пространства
+
+ 1.1. Создание каталога
+
+Для нового ТП нужен пустой каталог, владельцем которого является пользователь `postgres`:
+
+```bash
+student$ sudo -u postgres mkdir /var/lib/postgresql/ts_dir
+```
+
+ 1.2. Создание табличного пространства
+
+```sql
+student@student= CREATE TABLESPACE ts LOCATION '/var/lib/postgresql/ts_dir';
+CREATE TABLESPACE
+```
+
+ 1.3. Проверка списка ТП
+
+```sql
+student@student= \db
+
+            List of tablespaces
+    Name    |  Owner   |         Location          
+------------+----------+---------------------------
+ pg_default | postgres | 
+ pg_global  | postgres | 
+ ts         | student  | /var/lib/postgresql/ts_dir
+(3 rows)
+```
+
+Результат: Табличное пространство `ts` успешно создано, владелец — `student` (роль, выполнившая команду).
+
+---
+
+ Задание 2. Изменение ТП по умолчанию для template1
+
+```sql
+student@student= ALTER DATABASE template1 SET TABLESPACE ts;
+ALTER DATABASE
+```
+
+Проверка:
+
+```sql
+student@student= SELECT spcname
+FROM pg_tablespace
+WHERE oid = (SELECT dattablespace FROM pg_database WHERE datname = 'template1');
+
+ spcname 
+---------
+ ts
+(1 row)
+```
+
+Результат: Для шаблона `template1` установлено табличное пространство `ts`. Все объекты шаблона физически перенесены в новый каталог.
+
+---
+
+ Задание 3. Создание новой базы данных и проверка ТП
+
+ 3.1. Создание базы без явного указания TABLESPACE
+
+```sql
+student@student= CREATE DATABASE db;
+CREATE DATABASE
+```
+
+ 3.2. Проверка унаследованного табличного пространства
+
+```sql
+student@student= SELECT spcname
+FROM pg_tablespace
+WHERE oid = (SELECT dattablespace FROM pg_database WHERE datname = 'db');
+
+ spcname 
+---------
+ ts
+(1 row)
+```
+
+Вывод: Если нет явного указания `TABLESPACE`, табличное пространство по умолчанию определяется шаблоном, из которого клонируется новая база данных. В нашем случае новая база унаследовала `ts` от `template1`.
+
+---
+
+ Задание 4. Поиск символической ссылки в PGDATA
+
+ 4.1. Получение OID табличного пространства
+
+```sql
+student@student= SELECT oid AS tsoid FROM pg_tablespace WHERE spcname = 'ts';
+
+ tsoid 
+-------
+ 16386
+(1 row)
+```
+
+ 4.2. Просмотр символической ссылки
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/pg_tblspc/16386
+
+lrwxrwxrwx 1 postgres postgres 26 ноя 15 12:40 
+/var/lib/postgresql/16/main/pg_tblspc/16386 -> /var/lib/postgresql/ts_dir
+```
+
+ 4.3. Просмотр структуры каталога ТП
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/ts_dir
+
+drwx------ 2 postgres postgres 4096 ноя 15 12:38 PG_16_202307071
+```
+
+Результат: 
+- PostgreSQL создал символическую ссылку `PGDATA/pg_tblspc/<oid_тп>` → каталог ТП
+- Внутри каталога пользовательского ТП появился дополнительный уровень вложенности — версия сервера (`PG_16_...`). Это сделано для удобства обновления сервера на другую версию
+- Внутри каталога версии данные дополнительно разложены по подкаталогам баз данных (по OID)
+
+Схема хранения:
+```
+PGDATA/global/                          → pg_global
+PGDATA/base/<dboid>/                    → pg_default
+PGDATA/pg_tblspc/<tsoid> → /path/PG_16_.../<dboid>/  → ts
+```
+
+---
+
+ Задание 5. Удаление табличного пространства
+
+ 5.1. Возврат ТП по умолчанию для template1
+
+```sql
+student@student= ALTER DATABASE template1 SET TABLESPACE pg_default;
+ALTER DATABASE
+```
+
+ 5.2. Удаление базы данных, использующей ТП
+
+```sql
+student@student= DROP DATABASE db;
+DROP DATABASE
+```
+
+ 5.3. Удаление табличного пространства
+
+```sql
+student@student= DROP TABLESPACE ts;
+DROP TABLESPACE
+```
+
+ 5.4. Удаление каталога в файловой системе
+
+```bash
+student$ sudo -u postgres rm -rf /var/lib/postgresql/ts_dir
+```
+
+ 5.5. Проверка результата
+
+```sql
+student@student= \db
+
+           List of tablespaces
+    Name    |  Owner   | Location 
+------------+----------+----------
+ pg_default | postgres | 
+ pg_global  | postgres | 
+(2 rows)
+```
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/pg_tblspc/
+total 0
+```
+
+Результат: Табличное пространство удалено, символическая ссылка убрана автоматически.
+
+>  Важно: `DROP TABLESPACE` можно выполнить только когда ТП пусто — ни одна база данных не должна использовать его ни как ТП по умолчанию, ни для хранения отдельных объектов. Каталог в файловой системе PostgreSQL не удаляет (точнее, удаляет только свою структуру версии), поэтому его нужно убрать вручную.
+
+---
+
+ Дополнительные эксперименты: назначение ТП объектам
+
+ 1. База данных с явным указанием ТП
+
+```sql
+student@student= CREATE TABLESPACE ts LOCATION '/var/lib/postgresql/ts_dir';
+CREATE TABLESPACE
+
+student@student= CREATE DATABASE appdb TABLESPACE ts;
+CREATE DATABASE
+
+student@student= \c appdb
+You are now connected to database "appdb" as user "student".
+```
+
+ 2. Таблица в ТП по умолчанию и в явно указанном ТП
+
+```sql
+appdb@student= CREATE TABLE t1(
+    id integer GENERATED ALWAYS AS IDENTITY,
+    name text
+);
+CREATE TABLE
+
+appdb@student= CREATE TABLE t2(n numeric) TABLESPACE pg_default;
+CREATE TABLE
+
+appdb@student= SELECT tablename, tablespace FROM pg_tables WHERE schemaname = 'public';
+
+ tablename | tablespace 
+-----------+------------
+ t1        | 
+ t2        | pg_default
+(2 rows)
+```
+
+Результат: Пустое поле `tablespace` у `t1` означает, что используется ТП по умолчанию базы данных (`ts`). У `t2` поле заполнено, так как ТП указано явно.
+
+ 3. Индекс в отдельном ТП
+
+```sql
+appdb@student= CREATE INDEX ON t1(id) TABLESPACE pg_default;
+CREATE INDEX
+
+appdb@student= SELECT indexname, tablespace FROM pg_indexes WHERE tablename = 't1';
+
+ indexname | tablespace 
+-----------+------------
+ t1_id_idx | pg_default
+(1 row)
+```
+
+Вывод: Таблица и её индекс могут физически находиться в разных табличных пространствах. Это позволяет, например, вынести индексы на быстрые SSD, а сами данные оставить на ёмких HDD.
+
+ 4. Уборка
+
+```sql
+appdb@student= \c student
+student@student= DROP DATABASE appdb;
+DROP DATABASE
+student@student= DROP TABLESPACE ts;
+DROP TABLESPACE
+```
+
+```bash
+student$ sudo -u postgres rm -rf /var/lib/postgresql/ts_dir
+```
+
+---
+
+ Практика+: настройка random_page_cost для табличного пространства
+
+ 1. Значения параметров по умолчанию
+
+```sql
+student@student= \dconfig page_cost
+
+List of configuration parameters
+    Parameter     | Value 
+------------------+-------
+ random_page_cost | 4
+ seq_page_cost    | 1
+(2 rows)
+```
+
+Пояснение: Параметры `seq_page_cost` и `random_page_cost` используются планировщиком запросов и задают примерную стоимость чтения одной страницы данных при последовательном и произвольном доступе соответственно. Значения по умолчанию (4:1) рассчитаны на медленные HDD-диски.
+
+Чем меньше соотношение между этими параметрами, тем чаще планировщик будет предпочитать индексный доступ последовательному сканированию таблицы.
+
+ 2. Установка random_page_cost = 1.1 для pg_default
+
+```sql
+student@student= ALTER TABLESPACE pg_default SET (random_page_cost = 1.1);
+ALTER TABLESPACE
+```
+
+ 3. Проверка сохраненных настроек
+
+Настройки, сделанные командой `ALTER TABLESPACE`, сохраняются в столбце `spcoptions` таблицы `pg_tablespace`:
+
+```sql
+student@student= \db+
+
+                                          List of tablespaces
+    Name    |  Owner   | Location | Access privileges |        Options         |  Size   | Description 
+------------+----------+----------+-------------------+------------------------+---------+-------------
+ pg_default | postgres |          |                   | {random_page_cost=1.1} | 29 MB   | 
+ pg_global  | postgres |          |                   |                        | 589 kB  | 
+(2 rows)
+```
+
+Или напрямую через системный каталог:
+
+```sql
+student@student= SELECT spcname, spcoptions FROM pg_tablespace WHERE spcname = 'pg_default';
+
+  spcname   |       spcoptions       
+------------+------------------------
+ pg_default | {random_page_cost=1.1}
+(1 row)
+```
+
+ 4. Сброс настройки
+
+```sql
+student@student= ALTER TABLESPACE pg_default RESET (random_page_cost);
+ALTER TABLESPACE
+
+student@student= \db+
+
+                                       List of tablespaces
+    Name    |  Owner   | Location | Access privileges | Options |  Size  | Description 
+------------+----------+----------+-------------------+---------+--------+-------------
+ pg_default | postgres |          |                   |         | 29 MB  | 
+ pg_global  | postgres |          |                   |         | 589 kB | 
+(2 rows)
+```
+
+Вывод: Для дисков с разными характеристиками можно создать разные табличные пространства и настроить подходящие соотношения параметров `_cost`. Для быстрых SSD значение `random_page_cost` можно уменьшить практически до значения `seq_page_cost`.
+
+>  Параметры `_cost` можно установить и в `postgresql.conf` — тогда они будут действовать для всех табличных пространств. Настройка на уровне ТП имеет приоритет.
+
+---
+
+ Выводы
+
+В ходе выполнения лабораторной работы:
+ Ключевые моменты:
+- Дополнительный уровень вложенности (версия сервера) в каталоге пользовательского ТП нужен для удобства обновления мажорной версии PostgreSQL (`pg_upgrade`)
+- Символические ссылки в `pg_tblspc` создаются и удаляются сервером автоматически
+- Удалить ТП можно только когда в нём нет ни одного объекта
+- Настройки `seq_page_cost` / `random_page_cost` на уровне ТП перекрывают значения из `postgresql.conf`
+
+ Рекомендации:
+- Используйте отдельные ТП для разнесения «горячих» и архивных данных по дискам с разной скоростью
+- Для SSD-накопителей снижайте `random_page_cost` до 1.1–1.5, чтобы планировщик активнее использовал индексы
+- Не размещайте пользовательские ТП внутри `PGDATA` — это лишает смысла разделение и усложняет резервное копирование
+- Помните: табличные пространства не входят в логическую резервную копию `pg_dump`, их нужно создавать заранее
+
+
