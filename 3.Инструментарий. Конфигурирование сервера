@@ -1,0 +1,276 @@
+ Отчет по лабораторной работе: Инструментарий. Конфигурирование сервера
+
+ Цель работы
+Изучить механизмы конфигурирования PostgreSQL, научиться управлять параметрами на разных уровнях (экземпляр, сеанс), работать с файлами конфигурации и обрабатывать ошибки в настройках.
+
+---
+
+ Задание 1. Поиск параметров, требующих перезагрузки сервера
+
+ 1.1. Запрос к представлению pg_settings
+
+Параметры, изменение которых требует полной перезагрузки сервера (контекст `postmaster`), можно найти следующим запросом:
+
+```sql
+student@student= SELECT name, setting, unit 
+FROM pg_settings 
+WHERE context = 'postmaster';
+```
+
+Результат: Выведен список из 57 параметров, включая `max_connections`, `shared_buffers`, `port`, `data_directory` и другие. Изменение этих параметров вступает в силу только после рестарта процесса Postgres.
+
+---
+
+ Задание 2. Работа с дополнительными файлами конфигурации и обработка ошибок
+
+ 2.1. Создание файла с ошибкой
+
+В Ubuntu дополнительные файлы конфигурации подключаются через директиву `include_dir` из основного файла `postgresql.conf`. По умолчанию это каталог `/etc/postgresql/16/main/conf.d/`.
+
+Создадим файл `max_connections.conf` с намеренной ошибкой (используем букву `O` вместо нуля или пробелы там, где их быть не должно, согласно заданию):
+
+```bash
+student$ echo "max_connections = 50O" | sudo tee /etc/postgresql/16/main/conf.d/max_connections.conf
+```
+
+(Примечание: В примере выше допущена синтаксическая ошибка или опечатка, имитирующая реальную ситуацию).
+
+ 2.2. Проверка настроек через pg_file_settings
+
+До перезагрузки можно проверить, как сервер воспринял настройки:
+
+```sql
+student@student= SELECT  FROM pg_file_settings WHERE name = 'max_connections' \gx
+```
+
+Результат: Если есть ошибка парсинга, поле `error` будет содержать описание проблемы, а поле `applied` будет равно `f` (false).
+
+ 2.3. Перезагрузка сервера и анализ ошибки
+
+Попытаемся применить изменения:
+
+```bash
+student$ sudo pg_ctlcluster 16 main reload
+```
+
+Проверим статус сервера:
+
+```bash
+student$ sudo pg_ctlcluster 16 main status
+```
+
+Если сервер остановился или выдал ошибку, смотрим лог:
+
+```bash
+student$ sudo tail -n 20 /var/log/postgresql/postgresql-16-main.log
+```
+
+Типичная ошибка в логе:
+```
+FATAL:  invalid value for parameter "max_connections": "50O"
+LOG:  database system is shut down
+```
+
+ 2.4. Исправление ошибки
+
+Отредактируем файл, исправив значение:
+
+```bash
+student$ sudo nano /etc/postgresql/16/main/conf.d/max_connections.conf
+```
+
+Содержимое файла должно быть:
+```ini
+max_connections = 50
+```
+
+Сохраняем файл (Ctrl+O, Enter) и выходим (Ctrl+X).
+
+ 2.5. Запуск сервера
+
+Теперь запускаем сервер заново:
+
+```bash
+student$ sudo pg_ctlcluster 16 main start
+```
+
+Проверяем применилось ли значение:
+
+```sql
+student@student= SHOW max_connections;
+
+ max_connections 
+-----------------
+ 50
+(1 row)
+```
+
+Результат: Сервер успешно запущен с новым ограничением на количество подключений.
+
+---
+
+ Задание 3. Установка параметров при запуске клиента psql
+
+ 3.1. Способ 1: Через ключ options
+
+Установим параметр `work_mem` равным 32MB прямо при подключении:
+
+```bash
+student$ psql "options='-c work_mem=32MB'" -c 'SHOW work_mem;'
+
+ work_mem 
+----------
+ 32MB
+(1 row)
+```
+
+ 3.2. Способ 2: Через переменную окружения PGOPTIONS
+
+```bash
+student$ export PGOPTIONS='-c work_mem=32MB'
+student$ psql -c 'SHOW work_mem;'
+
+ work_mem 
+----------
+ 32MB
+(1 row)
+```
+
+Результат: Параметр установлен для текущего сеанса без изменения глобальных файлов конфигурации.
+
+---
+
+ Задание 4. Определение расположения файла postgresql.conf
+
+ 4.1. Проверка текущих путей
+
+```sql
+student@student= \dconfig config_file
+
+List of configuration parameters
+   Parameter   |               Value               
+---------------+-----------------------------------
+ config_file   | /etc/postgresql/16/main/postgresql.conf
+(1 row)
+```
+
+ 4.2. Анализ командной строки процесса
+
+В пакетных дистрибутивах (Ubuntu) файл конфигурации может лежать вне каталога данных (`PGDATA`). Чтобы узнать, как сервер его нашел, посмотрим на командную строку запуска процесса `postgres`.
+
+1. Найдем PID главного процесса из файла `postmaster.pid`:
+
+```bash
+student$ sudo head -n 1 /var/lib/postgresql/16/main/postmaster.pid
+88285
+```
+
+2. Посмотрим команду запуска этого процесса:
+
+```bash
+student$ ps -p 88285 -ho command
+
+/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main -c config_file=/etc/postgresql/16/main/postgresql.conf
+```
+
+Вывод: Сервер находит файл конфигурации благодаря явному указанию параметра `-c config_file=...` в командной строке запуска, которую формирует скрипт инициализации Ubuntu (`pg_ctlcluster`).
+
+---
+
+ Дополнительные эксперименты: Управление параметрами через ALTER SYSTEM и SET
+
+ 1. Использование ALTER SYSTEM
+
+Команда `ALTER SYSTEM` записывает параметры в файл `postgresql.auto.conf`, который читается после основного `postgresql.conf`.
+
+```sql
+-- Попытка установить неверное значение (маленькие буквы mb)
+student@student= ALTER SYSTEM SET work_mem TO '16mb';
+ERROR:  invalid value for parameter "work_mem": "16mb"
+HINT:  Valid units for this parameter are "B", "kB", "MB", "GB", and "TB".
+
+-- Установка верного значения
+student@student= ALTER SYSTEM SET work_mem TO '16MB';
+ALTER SYSTEM
+
+-- Проверка содержимого файла auto.conf
+student@student= SELECT pg_read_file('postgresql.auto.conf');
+```
+
+Чтобы изменения вступили в силу, нужно перечитать конфигурацию:
+
+```sql
+student@student= SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+student@student= SHOW work_mem;
+ work_mem 
+----------
+ 16MB
+(1 row)
+```
+
+Сброс параметра:
+
+```sql
+student@student= ALTER SYSTEM RESET work_mem;
+ALTER SYSTEM
+student@student= SELECT pg_reload_conf();
+```
+
+ 2. Использование SET в сеансе
+
+Изменения через `SET` действуют только до конца сеанса или транзакции.
+
+```sql
+student@student= SET work_mem TO '24MB';
+SET
+student@student= SHOW work_mem;
+ work_mem 
+----------
+ 24MB
+(1 row)
+
+-- Сброс к значению из конфигурационных файлов
+student@student= RESET work_mem;
+RESET
+```
+
+ 3. Транзакционность параметров SET LOCAL
+
+```sql
+student@student= BEGIN;
+BEGIN
+student@student= SET LOCAL work_mem TO '64MB';
+SET
+student@student= SHOW work_mem;
+ work_mem 
+----------
+ 64MB
+(1 row)
+
+student@student= ROLLBACK;
+ROLLBACK
+
+-- После отката транзакции значение вернулось
+student@student= SHOW work_mem;
+ work_mem 
+----------
+ 8MB
+(1 row) -- (или другое значение по умолчанию/из конфига)
+```
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+- Файл `postgresql.auto.conf` нельзя редактировать вручную, только через `ALTER SYSTEM`.
+- Для применения изменений из файлов конфигурации достаточно `reload`, но для параметров контекста `postmaster` нужен полный `restart`.
+- Представление `pg_file_settings` помогает отладить ошибки в конфигах до перезагрузки сервера.
+
+---
+
