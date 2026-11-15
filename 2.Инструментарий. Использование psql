@@ -1,0 +1,222 @@
+ Отчет по лабораторной работе: Инструментарий. Использование psql
+
+ Цель работы
+Освоить работу с терминальным клиентом psql, научиться настраивать параметры подключения, форматирование вывода и обработку транзакций.
+
+---
+
+ Задание 1. Запуск psql и проверка информации о подключении
+
+ 1.1. Запуск psql
+
+```bash
+student$ psql
+```
+
+ 1.2. Проверка информации о подключении
+
+```sql
+=> \conninfo
+
+You are connected to database "student" as user "student" via socket in
+"/var/run/postgresql" at port "5432".
+```
+
+Результат: Подключение установлено к базе данных `student` под пользователем `student` через Unix socket на порту 5432.
+
+---
+
+ Задание 2. Вывод списка баз данных в подробном виде
+
+```sql
+=> \l+
+```
+
+Результат: Выведена подробная информация о базах данных с указанием владельца, кодировки, локали, размера и табличного пространства.
+
+---
+
+ Задание 3. Замена команды постраничного просмотра
+
+ 3.1. Настройка переменной PSQL_PAGER
+
+```bash
+student$ echo "\setenv PSQL_PAGER 'less -XS'" > ~/.psqlrc
+```
+
+Параметры less:
+- `-X` — не очищать экран при выходе из less
+- `-S` — не переносить длинные строки (можно прокручивать горизонтально)
+
+---
+
+ Задание 4. Настройка вида приглашения
+
+ 4.1. Добавление имени пользователя в приглашение
+
+```bash
+student$ echo "\set PROMPT1 '%n@%/%R%x% '" >> ~/.psqlrc
+student$ echo "\set PROMPT2 '%n@%/%R%x% '" >> ~/.psqlrc
+```
+
+Описание переменных:
+- `%n` — имя пользователя
+- `%/` — имя базы данных
+- `%R` — символ состояния транзакции
+- `%x` — символ состояния транзакции
+- `%` — символ суперпользователя () или обычный (=)
+
+Результат: Приглашение теперь показывает `student@student=` вместо просто `=>`.
+
+---
+
+ Задание 5. Вывод длительности выполнения команд
+
+ 5.1. Включение режима timing
+
+```bash
+student$ echo '\timing on' >> ~/.psqlrc
+```
+
+ 5.2. Проверка содержимого файла .psqlrc
+
+```bash
+student$ cat ~/.psqlrc
+
+\setenv PSQL_PAGER 'less -XS'
+\set PROMPT1 '%n@%/%R%x% '
+\set PROMPT2 '%n@%/%R%x% '
+\timing on
+```
+
+ 5.3. Перезапуск psql и проверка настроек
+
+```bash
+student$ psql
+student@student= \l+
+```
+
+Результат: 
+- Приглашение показывает имя пользователя и базы данных
+- После выполнения команд отображается время выполнения (например, `Time: 1.234 ms`)
+
+---
+
+ Задание 6. Работа с транзакциями и обработка ошибок
+
+ 6.1. Открытие транзакции
+
+```sql
+student@student= BEGIN;
+BEGIN
+
+student@student= CREATE TABLE t (id int);
+CREATE TABLE
+```
+
+Результат: Транзакция открыта, символ `` в приглашении указывает на активную транзакцию.
+
+ 6.2. Выполнение команды с ошибкой
+
+```sql
+student@student= INSERTINTO t VALUES(1);
+ERROR:  syntax error at or near "INSERTINTO"
+LINE 1: INSERTINTO t VALUES(1);
+        ^
+```
+
+Результат: Ошибка синтаксиса, символ приглашения изменился на `!` (ошибка в транзакции).
+
+ 6.3. Попытка исправить команду
+
+```sql
+student@student=! INSERT INTO t VALUES(1);
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+```
+
+Результат: PostgreSQL не может продолжить выполнение команд после ошибки в транзакции.
+
+ 6.4. Завершение транзакции
+
+```sql
+student@student=! COMMIT;
+ROLLBACK
+```
+
+Результат: Транзакция откатана, таблица `t` не создана.
+
+ 6.5. Проверка отсутствия таблицы
+
+```sql
+student@student= SELECT  FROM t;
+ERROR:  relation "t" does not exist
+LINE 1: SELECT  FROM t;
+                      ^
+```
+
+---
+
+ Задание 7. Использование переменной ON_ERROR_ROLLBACK
+
+ 7.1. Включение режима ON_ERROR_ROLLBACK
+
+```sql
+student@student= \set ON_ERROR_ROLLBACK on
+```
+
+Результат: Теперь psql автоматически создает SAVEPOINT перед каждой командой и откатывает к ней при ошибке.
+
+ 7.2. Тестирование режима
+
+```sql
+student@student= BEGIN;
+BEGIN
+
+student@student= CREATE TABLE t (id int);
+CREATE TABLE
+
+student@student= INSERTINTO t VALUES(1);
+ERROR:  syntax error at or near "INSERTINTO"
+LINE 1: INSERTINTO t VALUES(1);
+        ^
+
+student@student= INSERT INTO t VALUES(1);
+INSERT 0 1
+
+student@student= COMMIT;
+COMMIT
+```
+
+Результат: После исправления ошибки команда успешно выполнена, транзакция завершена.
+
+ 7.3. Проверка данных
+
+```sql
+student@student= SELECT  FROM t;
+ id 
+----
+  1
+(1 row)
+```
+
+ 7.4. Удаление тестовой таблицы
+
+```sql
+student@student= DROP TABLE t;
+DROP TABLE
+```
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+- psql — основной терминальный клиент для работы с PostgreSQL
+- Файл `~/.psqlrc` позволяет сохранять настройки между сессиями
+- Транзакции в PostgreSQL атомарны — при ошибке откатывается вся транзакция
+- Переменная `ON_ERROR_ROLLBACK` использует SAVEPOINT для частичного отката
+- Команды psql начинаются с обратной косой черты (`\`) и могут сокращаться
+
+---
+
+
