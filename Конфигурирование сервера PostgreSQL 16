@@ -1,0 +1,81 @@
+ Конфигурирование сервера PostgreSQL 16
+
+
+Блок 1. Параметры, требующие перезапуска сервера (Практика, п.1)
+
+Скопируйте и выполните этот блок в терминале, чтобы получить список всех параметров, изменение которых вступает в силу только после перезапуска (`postmaster`).
+
+```bash
+sudo -u postgres psql -c "
+SELECT 
+    name AS parameter_name, 
+    setting AS current_value, 
+    unit, 
+    context 
+FROM pg_settings 
+WHERE context = 'postmaster' 
+ORDER BY name;
+"
+```
+
+  Блок 2. Имитация ошибки в конфигурации и восстановление (Практика, п.2)
+
+Этот блок демонстрирует создание файла с ошибкой, попытку перезапуска, анализ логов и исправление ситуации. Можно копировать и выполнять по одной группе команд или весь блок целиком.
+
+```bash
+ 1. Создаем дополнительный файл конфигурации с заведомо ошибочным значением
+echo "max_connections = invalid_value" | sudo tee /etc/postgresql/16/main/conf.d/max_connections.conf
+
+ 2. Пытаемся перезапустить сервис (ожидаем ошибку запуска)
+sudo systemctl restart postgresql@16-main
+
+ 3. Проверяем статус службы (должен быть 'failed')
+sudo systemctl status postgresql@16-main --no-pager
+
+ 4. Смотрим последние 15 строк журнала systemd для поиска причины ошибки
+sudo journalctl -u postgresql@16-main -n 15 --no-pager
+
+ 5. ИСПРАВЛЕНИЕ: Удаляем ошибочный файл конфигурации
+sudo rm /etc/postgresql/16/main/conf.d/max_connections.conf
+
+ 6. Запускаем сервер корректно
+sudo systemctl start postgresql@16-main
+
+ 7. Финальная проверка: убеждаемся, что статус 'active (running)'
+sudo systemctl status postgresql@16-main --no-pager
+```
+
+
+  Блок 3. Установка параметра при запуске psql (Практика+, п.1)
+
+Демонстрация установки `work_mem = 32MB` на уровне клиентского подключения без изменения файлов конфигурации.
+
+```bash
+ Способ А: Через переменную окружения PGOPTIONS (рекомендуемый)
+PGOPTIONS="-c work_mem=32MB" sudo -u postgres psql -c "SHOW work_mem;"
+
+ Способ Б: Через параметр options в строке подключения
+sudo -u postgres psql "options=-c work_mem=32MB" -c "SHOW work_mem;"
+```
+ Ожидаемый результат в обоих случаях: `32MB`
+
+  Блок 4. Поиск расположения файла конфигурации (Практика+, п.2)
+
+В Ubuntu файл `postgresql.conf` лежит в `/etc/postgresql/16/main/`, а не в каталоге данных (`PGDATA`). Этот блок показывает, как сервер узнает об этом при запуске.
+
+```bash
+ 1. Узнаем текущий путь к основному файлу конфигурации через SQL
+sudo -u postgres psql -c "SHOW config_file;"
+
+ 2. Находим PID основного процесса postgres из файла postmaster.pid
+ Сохраняем PID в переменную для удобства
+PG_PID=$(head -n 1 /var/lib/postgresql/16/main/postmaster.pid)
+echo "PID основного процесса PostgreSQL: $PG_PID"
+
+ 3. Смотрим полную командную строку запуска этого процесса
+ Именно здесь виден ключ -c config_file=..., который передает systemd или pg_ctlcluster
+ps -p $PG_PID -f
+```
+
+
+
