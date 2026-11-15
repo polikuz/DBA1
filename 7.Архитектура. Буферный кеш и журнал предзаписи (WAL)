@@ -1,0 +1,245 @@
+ Отчет по лабораторной работе: Архитектура. Буферный кеш и журнал предзаписи (WAL)
+
+ Цель работы
+Изучить механизм буферизации данных в PostgreSQL, алгоритмы вытеснения страниц, структуру и назначение журнала предзаписи (WAL), процесс контрольных точек (checkpoint), а также роль фоновых процессов, обеспечивающих надежность и производительность системы.
+
+---
+
+ Задание 1. Изучение процессов, отвечающих за буферный кеш и WAL
+
+ 1.1. Поиск PID процесса postmaster
+
+PID главного процесса сервера хранится в первой строке файла `postmaster.pid`:
+
+```bash
+student$ sudo head -n 1 /var/lib/postgresql/16/main/postmaster.pid
+91343
+```
+
+ 1.2. Просмотр дочерних процессов
+
+Используем команду `ps` для отображения процессов, порожденных `postmaster`:
+
+```bash
+student$ sudo ps -o pid,command --ppid 91343
+
+  PID COMMAND
+91344 postgres: 16/main: checkpointer
+91345 postgres: 16/main: background writer
+91347 postgres: 16/main: walwriter
+91348 postgres: 16/main: autovacuum launcher
+91349 postgres: 16/main: logical replication launcher
+91392 postgres: 16/main: student student [local] idle
+```
+
+Результат: Выделены ключевые процессы, связанные с управлением памятью и журналом:
+   `checkpointer` — отвечает за выполнение контрольных точек.
+   `background writer` — фоновая запись "грязных" страниц.
+   `walwriter` — асинхронная запись WAL на диск.
+
+---
+
+ Задание 2. Остановка сервера в режиме fast
+
+Режим `fast` подразумевает корректное завершение работы: сервер прерывает активные соединения и выполняет контрольную точку, чтобы все изменения попали на диск.
+
+ 2.1. Очистка лога и остановка
+
+```bash
+student$ sudo -u postgres truncate -c -s 0 /var/log/postgresql/postgresql-16-main.log
+student$ sudo pg_ctlcluster 16 main stop
+```
+
+ 2.2. Запуск и анализ лога
+
+```bash
+student$ sudo pg_ctlcluster 16 main start
+student$ cat /var/log/postgresql/postgresql-16-main.log
+```
+
+Фрагмент лога:
+```text
+LOG:  received fast shutdown request
+LOG:  aborting any active transactions
+...
+LOG:  checkpoint starting: shutdown immediate
+LOG:  checkpoint complete: wrote 5 buffers (0.0%); ...
+LOG:  database system is shut down
+...
+LOG:  database system was shut down at 2026-04-10 17:09:09 MSK
+LOG:  database system is ready to accept connections
+```
+
+Результат: При запуске после остановки в режиме `fast` восстановление не требуется, так как данные были согласованы на диске перед выключением (`database system was shut down`).
+
+---
+
+ Задание 3. Остановка сервера в режиме immediate
+
+Режим `immediate` имитирует аварийное отключение питания: сервер немедленно завершает работу без выполнения контрольной точки и сброса буферов.
+
+ 3.1. Очистка лога и остановка
+
+```bash
+student$ sudo -u postgres truncate -c -s 0 /var/log/postgresql/postgresql-16-main.log
+student$ sudo pg_ctlcluster 16 main stop -m immediate --skip-systemctl-redirect
+```
+
+ 3.2. Запуск и анализ лога
+
+```bash
+student$ sudo pg_ctlcluster 16 main start
+student$ cat /var/log/postgresql/postgresql-16-main.log
+```
+
+Фрагмент лога:
+```text
+LOG:  received immediate shutdown request
+LOG:  database system is shut down
+...
+LOG:  starting PostgreSQL 16.11 ...
+...
+LOG:  database system was interrupted; last known up at 2026-04-10 17:09:09 MSK
+LOG:  redo starts at 0/19220A0
+LOG:  redo done at 0/19220D8
+LOG:  checkpoint starting: end-of-recovery
+LOG:  checkpoint complete: wrote 3 buffers (0.0%); ...
+LOG:  database system is ready to accept connections
+```
+
+Результат:
+1.  Сервер обнаружил несогласованное состояние (`database system was interrupted`).
+2.  Запустился процесс восстановления (redo): сервер прочитал WAL и применил изменения, которые не успели попасть в основные файлы данных.
+3.  После восстановления выполнена новая контрольная точка (`checkpoint starting: end-of-recovery`).
+
+---
+
+ Дополнительные эксперименты: Влияние буферного кеша на производительность
+
+ 1. Подготовка данных
+
+Создадим базу данных и таблицу с 100 000 строк:
+
+```sql
+student@student= CREATE DATABASE arch_wal_overview;
+CREATE DATABASE
+
+student@student= \c arch_wal_overview
+arch_wal_overview@student= CREATE TABLE t(n integer);
+CREATE TABLE
+
+arch_wal_overview@student= INSERT INTO t SELECT id FROM generate_series(1, 100_000) AS id;
+INSERT 0 100000
+```
+
+Перезапустим сервер, чтобы очистить буферный кеш:
+
+```bash
+student$ sudo pg_ctlcluster 16 main restart
+```
+
+ 2. Первый запуск запроса (чтение с диска)
+
+Выполним запрос с анализом использования буферов:
+
+```sql
+arch_wal_overview@student= EXPLAIN (analyze, buffers, costs off, timing off) SELECT  FROM t;
+
+ QUERY PLAN
+ Seq Scan on t (actual rows=100000 loops=1)
+   Buffers: shared read=443
+ Planning:
+   Buffers: shared hit=12 read=8 dirtied=1
+ Planning Time: 0.932 ms
+ Execution Time: 16.179 ms
+(6 rows)
+```
+
+Результат: Параметр `shared read=443` показывает, что серверу пришлось прочитать 443 страницы с диска, так как их не было в кеше.
+
+ 3. Второй запуск запроса (чтение из кеша)
+
+```sql
+arch_wal_overview@student= EXPLAIN (analyze, buffers, costs off, timing off) SELECT  FROM t;
+
+ QUERY PLAN
+ Seq Scan on t (actual rows=100000 loops=1)
+   Buffers: shared hit=443
+ Planning Time: 0.029 ms
+ Execution Time: 10.769 ms
+(4 rows)
+```
+
+Результат:
+   `shared hit=443`: Все данные были найдены в буферном кеше.
+   Время выполнения сократилось с ~16 мс до ~10 мс.
+   Время планирования также уменьшилось, так как системные каталоги тоже закэшированы.
+
+---
+
+ Дополнительные эксперименты: Работа с журналом WAL
+
+ 1. Проверка текущей позиции WAL
+
+```sql
+arch_wal_overview@student= SELECT pg_current_wal_lsn();
+
+ pg_current_wal_lsn 
+--------------------
+ 0/2378D28
+(1 row)
+```
+
+ 2. Выполнение операции изменения данных
+
+```sql
+arch_wal_overview@student= UPDATE t SET n = 100_001 WHERE n = 1;
+UPDATE 1
+```
+
+ 3. Проверка новой позиции и размера записей WAL
+
+```sql
+arch_wal_overview@student= SELECT pg_current_wal_lsn();
+
+ pg_current_wal_lsn 
+--------------------
+ 0/237BD40
+(1 row)
+
+arch_wal_overview@student= SELECT '0/237BD40'::pg_lsn - '0/2378D28'::pg_lsn AS bytes;
+
+ bytes 
+-------
+ 12312
+(1 row)
+```
+
+Результат: Для обновления одной строки было сгенерировано 12 312 байт записей WAL. Это включает не только сами данные, но и служебную информацию.
+
+ 4. Просмотр файлов WAL
+
+```sql
+arch_wal_overview@student= SELECT  FROM pg_ls_waldir() ORDER BY name LIMIT 5;
+
+           name            |   size   |        modification         
+---------------------------+----------+-----------------------------
+ 000000010000000000000002  | 16777216 | 2026-04-10 17:03:45+03
+ 000000010000000000000003  | 16777216 | 2026-04-10 17:03:40+03
+ ...
+```
+
+Результат: Файлы WAL имеют стандартный размер 16 МБ.
+
+---
+
+ Выводы
+
+
+ Ключевые моменты:
+   Буферный кеш (Shared Buffers) находится в общей памяти и ускоряет работу за счет снижения количества обращений к диску.
+   WAL (Write-Ahead Log) гарантирует сохранность данных при сбоях. Восстановление всегда начинается с последней успешной контрольной точки.
+   Checkpointer критически важен для управления размером WAL и обеспечения точки отката при восстановлении.
+   Режим `immediate` следует использовать только в экстренных случаях или для тестирования механизмов восстановления, так как он увеличивает время запуска сервера.
+
+---
