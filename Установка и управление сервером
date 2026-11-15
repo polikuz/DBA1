@@ -1,0 +1,102 @@
+ Установка PostgreSQL 16 на Linux
+
+ Описание задачи
+Выполнить установку серверной и клиентской части СУБД PostgreSQL версии 16 на операционную систему Linux (Ubuntu/Debian), проверить работоспособность сервисов и выполнить базовую настройку доступа.
+
+Техническое окружение
+- ОС: Ubuntu 22.04 LTS / Debian 12
+- Версия PostgreSQL:16.x
+- Пакетный менеджер: APT
+
+Ход выполнения
+
+1. Подготовка системы
+Обновление индексов пакетов и установка зависимостей для работы с HTTPS-репозиториями.
+
+```bash
+sudo apt update
+sudo apt install -y curl gnupg lsb-release ca-certificates
+```
+
+2. Подключение официального репозитория
+Добавление репозитория `apt.postgresql.org` для получения стабильной версии PG 16.
+
+```bash
+Создание файла списка источников
+sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+
+Импорт GPG-ключа
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+
+# Обновление кэша пакетов
+sudo apt update
+```
+
+3. Установка компонентов
+Установка сервера, клиента и дополнительных модулей (`contrib`).
+
+```bash
+sudo apt install -y postgresql-16 postgresql-client-16 postgresql-contrib-16
+```
+
+4. Верификация установки
+
+Проверка статуса сервиса
+```bash
+systemctl status postgresql@16-main
+```
+> Ожидаемый результат: `Active: active (running)`
+
+Проверка версии CLI
+```bash
+psql --version
+```
+>Ожидаемый вывод: `psql (PostgreSQL) 16.x`
+
+Тестовое подключение
+Подключение под системным пользователем `postgres` и выполнение диагностических запросов.
+
+```bash
+sudo -u postgres psql
+```
+
+```sql
+-- Проверка версии сервера
+SELECT version();
+
+-- Список баз данных
+\l
+
+-- Список ролей
+\du
+
+-- Выход
+\q
+```
+
+Базовая конфигурация безопасности
+
+Для удобства дальнейшей разработки была изменена схема аутентификации с `peer` на `md5` (пароль) для локальных подключений пользователя `postgres`.
+
+1. Редактирование `pg_hba.conf`:
+   ```bash
+   sudo nano /etc/postgresql/16/main/pg_hba.conf
+   ```
+   Изменение строки:
+   ```diff
+   - local   all   postgres   peer
+   + local   all   postgres   md5
+   ```
+
+2. Применение настроек:
+   ```bash
+   sudo systemctl reload postgresql@16-main
+   ```
+
+3. Установка пароля:
+   ```bash
+   sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'strong_password';"
+   ```
+
+Заключение
+Инструментарий администратора успешно развернут. Сервер PostgreSQL 16 работает, клиентские утилиты доступны, базовый доступ настроен. Система готова к выполнению лабораторных работ по управлению табличными пространствами и резервному копированию.
