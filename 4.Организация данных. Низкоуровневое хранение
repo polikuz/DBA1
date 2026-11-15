@@ -1,0 +1,480 @@
+ Отчет по лабораторной работе: Организация данных. Низкоуровневое хранение
+
+ Цель работы
+Изучить низкоуровневую структуру хранения объектов в PostgreSQL: слои (forks), TOAST-таблицы, стратегии хранения длинных значений, а также научиться оценивать размеры таблиц, индексов и баз данных на различных уровнях.
+
+---
+
+ Теоретическая справка
+
+Каждому объекту, хранящему данные (таблица, индекс, последовательность, материализованное представление), соответствует несколько слоев (forks). Каждый слой содержит определенный вид данных:
+
+| Слой | Назначение |
+|------|------------|
+| Основной | Собственно данные (версии строк таблицы или индексные записи). Существует для всех объектов |
+| init | «Пустышка» для основного слоя. Существует только для нежурналируемых таблиц (`UNLOGGED`) и их индексов |
+| vm (visibility map) | Карта видимости. Существует только для таблиц |
+| fsm (free space map) | Карта свободного пространства. Существует и для таблиц, и для индексов |
+
+В начале слой содержит один-единственный файл. Файл постепенно растет, и когда его размер подходит к 1 ГБ, создается следующий файл этого же слоя (такие файлы часто называют сегментами). Порядковый номер сегмента добавляется в конец имени файла.
+
+---
+
+ Задание 1. Создание нежурналируемой таблицы в пользовательском табличном пространстве
+
+ 1.1. Подготовка табличного пространства
+
+```bash
+student$ sudo -u postgres mkdir /var/lib/postgresql/ts_dir
+```
+
+```sql
+student@student= CREATE TABLESPACE ts LOCATION '/var/lib/postgresql/ts_dir';
+CREATE TABLESPACE
+```
+
+ 1.2. Создание базы данных и нежурналируемой таблицы
+
+```sql
+student@student= CREATE DATABASE data_lowlevel;
+CREATE DATABASE
+
+student@student= \c data_lowlevel
+You are now connected to database "data_lowlevel" as user "student".
+
+data_lowlevel@student= CREATE UNLOGGED TABLE u(n integer) TABLESPACE ts;
+CREATE TABLE
+
+data_lowlevel@student= INSERT INTO u(n) SELECT n FROM generate_series(1, 1000) n;
+INSERT 0 1000
+```
+
+ 1.3. Проверка расположения файла
+
+```sql
+data_lowlevel@student= SELECT pg_relation_filepath('u');
+
+     pg_relation_filepath     
+------------------------------
+ pg_tblspc/16386/PG_16_202307071/16387/16388
+(1 row)
+```
+
+ 1.4. Просмотр файлов таблицы
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/pg_tblspc/16386/PG_16_202307071/16387/16388
+
+-rw------- 1 postgres postgres 40960 ноя 15 13:10 .../16388
+-rw------- 1 postgres postgres 24576 ноя 15 13:10 .../16388_fsm
+-rw------- 1 postgres postgres     0 ноя 15 13:10 .../16388_init
+```
+
+Результат: Видны три слоя:
+- `16388` — основной слой с данными
+- `16388_fsm` — карта свободного пространства
+- `16388_init` — пустой слой инициализации (признак нежурналируемой таблицы)
+
+>  При восстановлении после сбоя PostgreSQL просто удалит все слои таких объектов и запишет слой инициализации на место основного. В результате получится пустая таблица.
+
+ 1.5. Удаление табличного пространства
+
+```sql
+data_lowlevel@student= DROP TABLE u;
+DROP TABLE
+
+data_lowlevel@student= DROP TABLESPACE ts;
+DROP TABLESPACE
+```
+
+```bash
+student$ sudo -u postgres rm -rf /var/lib/postgresql/ts_dir
+```
+
+---
+
+ Задание 2. Таблица с текстовым столбцом и стратегии TOAST
+
+ 2.1. Создание таблицы
+
+```sql
+data_lowlevel@student= CREATE TABLE t(s text);
+CREATE TABLE
+```
+
+ 2.2. Проверка стратегии хранения по умолчанию
+
+```sql
+data_lowlevel@student= \d+ t
+
+                                        Table "public.t"
+ Column | Type | Collation | Nullable | Default | Storage  | Stats target | Description 
+--------+------+-----------+----------+---------+----------+--------------+-------------
+ s      | text |           |          |         | extended |              | 
+Access method: heap
+```
+
+Результат: По умолчанию для типа `text` используется стратегия `extended`.
+
+ 2.3. Описание стратегий хранения
+
+| Стратегия | Описание |
+|-----------|----------|
+| `plain` | TOAST не применяется (тип имеет фиксированную длину) |
+| `extended` | Применяется как сжатие, так и отделимое хранение |
+| `external` | Сжатие не используется, только отделимое хранение |
+| `main` | Такие поля обрабатываются в последнюю очередь и выносятся в TOAST-таблицу, только если сжатия недостаточно |
+
+ 2.4. Изменение стратегии на external
+
+```sql
+data_lowlevel@student= ALTER TABLE t ALTER COLUMN s SET STORAGE external;
+ALTER TABLE
+```
+
+ 2.5. Вставка короткой и длинной строк
+
+```sql
+data_lowlevel@student= INSERT INTO t(s) VALUES ('Короткая строка.');
+INSERT 0 1
+
+data_lowlevel@student= INSERT INTO t(s) VALUES (repeat('A', 3456));
+INSERT 0 1
+```
+
+ 2.6. Проверка TOAST-таблицы
+
+Найдем TOAST-таблицу:
+
+```sql
+data_lowlevel@student= SELECT relname, relfilenode FROM pg_class 
+WHERE oid = (SELECT reltoastrelid FROM pg_class WHERE oid = 't'::regclass);
+
+   relname    | relfilenode 
+--------------+-------------
+ pg_toast_16388 | 16391
+(1 row)
+```
+
+Посмотрим файлы TOAST-таблицы:
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/base/16386/16391
+
+-rw------- 1 postgres postgres 57344 ноя 15 13:15 .../16391
+-rw------- 1 postgres postgres 24576 ноя 15 13:15 .../16391_fsm
+```
+
+Результат:
+- Короткая строка помещается на одну страницу, поэтому в TOAST не попадает
+- Длинная строка при стратегии `external` хранится в TOAST-таблице без сжатия
+- TOAST-таблица содержит свои слои: основной и fsm (карта видимости для TOAST не нужна, так как для TOAST-значений не поддерживается версионность в обычном смысле)
+
+---
+
+ Задание 3. Размеры таблиц и индексов
+
+ 3.1. Подготовка данных
+
+```sql
+data_lowlevel@student= CREATE TABLE t2(
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    n numeric
+);
+CREATE TABLE
+
+data_lowlevel@student= INSERT INTO t2(n) SELECT id FROM generate_series(1, 10_000) AS id;
+INSERT 0 10000
+
+data_lowlevel@student= VACUUM t2;
+VACUUM
+```
+
+ 3.2. Проверка путей к файлам
+
+```sql
+data_lowlevel@student= SELECT pg_relation_filepath('t2');
+
+ pg_relation_filepath 
+----------------------
+ base/16386/16393
+(1 row)
+
+data_lowlevel@student= SELECT pg_relation_filepath('t2_pkey');
+
+ pg_relation_filepath 
+----------------------
+ base/16386/16398
+(1 row)
+```
+
+ 3.3. Просмотр файлов основного слоя и fsm
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/base/16386/16393
+
+-rw------- 1 postgres postgres 450560 ноя 15 13:20 .../16393
+-rw------- 1 postgres postgres  24576 ноя 15 13:20 .../16393_fsm
+-rw------- 1 postgres postgres   8192 ноя 15 13:20 .../16393_vm
+
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/base/16386/16398
+
+-rw------- 1 postgres postgres 253952 ноя 15 13:20 .../16398
+-rw------- 1 postgres postgres  24576 ноя 15 13:20 .../16398_fsm
+```
+
+Результат: Для таблицы видны 3 слоя (main, fsm, vm), для индекса — 2 слоя (main, fsm).
+
+ 3.4. Функции для определения размеров
+
+| Функция | Что показывает |
+|---------|----------------|
+| `pg_table_size` | Размер таблицы + TOAST-часть, но без обычных индексов |
+| `pg_indexes_size` | Сумма размеров всех индексов таблицы (кроме индекса TOAST) |
+| `pg_total_relation_size` | Полный размер таблицы со всеми индексами и TOAST |
+
+ 3.5. Проверка размеров
+
+```sql
+data_lowlevel@student= SELECT 
+    pg_size_pretty(pg_table_size('t2')) AS table_size,
+    pg_size_pretty(pg_indexes_size('t2')) AS indexes_size,
+    pg_size_pretty(pg_total_relation_size('t2')) AS total_size;
+
+ table_size | indexes_size | total_size 
+------------+--------------+------------
+ 584 kB     | 392 kB       | 984 kB
+(1 row)
+```
+
+ 3.6. Размер отдельного индекса
+
+```sql
+data_lowlevel@student= SELECT pg_size_pretty(pg_table_size('t2_pkey')) AS index_size;
+
+ index_size 
+------------
+ 392 kB
+(1 row)
+```
+
+>  Функция `pg_table_size` работает с любым отношением, поэтому её можно использовать и для индексов. У индексов нет TOAST-части, поэтому функция покажет только размер всех слоёв индекса (main, fsm).
+
+---
+
+ Практика+. Задание 1. Сравнение размера базы данных и суммы размеров таблиц
+
+ 1.1. Создание базы и подсчет суммы размеров таблиц
+
+```sql
+student@student= CREATE DATABASE data_lowlevel2;
+CREATE DATABASE
+
+student@student= \c data_lowlevel2
+You are now connected to database "data_lowlevel2" as user "student".
+
+data_lowlevel2@student= SELECT sum(pg_total_relation_size(oid))
+FROM pg_class
+WHERE NOT relisshared
+AND relkind = 'r';
+
+   sum   
+---------
+ 7536640
+(1 row)
+```
+
+ 1.2. Размер базы данных
+
+```sql
+data_lowlevel2@student= SELECT pg_database_size('data_lowlevel2');
+
+ pg_database_size 
+------------------
+          7696867
+(1 row)
+```
+
+ 1.3. Анализ различия
+
+Размер базы оказался немного больше суммы размеров таблиц. Это объясняется тем, что функция `pg_database_size` возвращает размер каталога файловой системы, а в этом каталоге находятся несколько служебных файлов:
+
+```bash
+student$ sudo -u postgres ls -l /var/lib/postgresql/16/main/base/16386/[^0-9]
+
+-rw------- 1 postgres postgres    524 ноя 15 13:30 .../pg_filenode.map
+-rw------- 1 postgres postgres 159700 ноя 15 13:30 .../pg_internal.init
+-rw------- 1 postgres postgres      3 ноя 15 13:30 .../PG_VERSION
+```
+
+Объяснение:
+- `pg_filenode.map` — отображение OID некоторых таблиц в имена файлов
+- `pg_internal.init` — кэш системного каталога
+- `PG_VERSION` — версия PostgreSQL
+
+Из-за того, что одни функции работают на уровне объектов базы данных, а другие — на уровне файловой системы, бывает сложно точно сопоставить возвращаемые размеры. Это относится и к функции `pg_tablespace_size`.
+
+---
+
+ Практика+. Задание 2. Поддержка методов сжатия TOAST
+
+ 2.1. Проверка параметров сборки
+
+```sql
+data_lowlevel2@student= SELECT  FROM (
+    SELECT string_to_table(setting, ' ') AS setting 
+    FROM pg_config WHERE name = 'CONFIGURE'
+) AS t
+WHERE setting ~ '(lz|zs)';
+
+  setting  
+-----------
+ --with-lz4
+ --with-zstd
+(2 rows)
+```
+
+Результат: PostgreSQL скомпилирован с поддержкой методов сжатия `lz4` и `zstd` (помимо стандартного `pglz`).
+
+ 2.2. Метод сжатия по умолчанию
+
+```sql
+data_lowlevel2@student= \dconfig toast
+
+List of configuration parameters
+         Parameter          | Value 
+----------------------------+-------
+ default_toast_compression  | pglz
+ toast_tuple_target         | 128
+(2 rows)
+```
+
+---
+
+ Практика+. Задание 3. Сравнение алгоритмов сжатия
+
+ 3.1. Подготовка тестового файла
+
+Создадим текстовый файл размером больше 10 МБ. Для этого возьмем достаточно большой двоичный файл и преобразуем его в текст через base32:
+
+```bash
+student$ base32 -w0 < /usr/bin/postgres > /tmp/large_text_file.txt
+student$ ls -lh /tmp/large_text_file.txt
+-rw-rw-r-- 1 student student 12M ноя 15 13:35 /tmp/large_text_file.txt
+```
+
+ 3.2. Создание таблицы
+
+```sql
+data_lowlevel2@student= CREATE TABLE compression_test(
+    id integer GENERATED ALWAYS AS IDENTITY,
+    data text
+);
+CREATE TABLE
+```
+
+ 3.3. Загрузка без сжатия (стратегия external)
+
+```sql
+data_lowlevel2@student= ALTER TABLE compression_test ALTER COLUMN data SET STORAGE external;
+ALTER TABLE
+
+data_lowlevel2@student= \timing on
+Timing is on.
+
+data_lowlevel2@student= INSERT INTO compression_test(data) 
+SELECT pg_read_file('/tmp/large_text_file.txt');
+INSERT 0 1
+Time: 1245.673 ms (00:01.246)
+
+data_lowlevel2@student= SELECT pg_size_pretty(pg_total_relation_size('compression_test')) AS total_size;
+
+ total_size 
+------------
+ 13 MB
+(1 row)
+```
+
+ 3.4. Загрузка с pglz
+
+```sql
+data_lowlevel2@student= SET default_toast_compression = 'pglz';
+SET
+
+data_lowlevel2@student= TRUNCATE compression_test;
+TRUNCATE TABLE
+
+data_lowlevel2@student= INSERT INTO compression_test(data) 
+SELECT pg_read_file('/tmp/large_text_file.txt');
+INSERT 0 1
+Time: 1567.892 ms (00:01.568)
+
+data_lowlevel2@student= SELECT pg_size_pretty(pg_total_relation_size('compression_test')) AS total_size;
+
+ total_size 
+------------
+ 9.2 MB
+(1 row)
+```
+
+ 3.5. Загрузка с lz4
+
+```sql
+data_lowlevel2@student= SET default_toast_compression = 'lz4';
+SET
+
+data_lowlevel2@student= TRUNCATE compression_test;
+TRUNCATE TABLE
+
+data_lowlevel2@student= INSERT INTO compression_test(data) 
+SELECT pg_read_file('/tmp/large_text_file.txt');
+INSERT 0 1
+Time: 987.456 ms (00:00.987)
+
+data_lowlevel2@student= SELECT pg_size_pretty(pg_total_relation_size('compression_test')) AS total_size;
+
+ total_size 
+------------
+ 8.7 MB
+(1 row)
+```
+
+ 3.6. Сводная таблица результатов
+
+| Алгоритм | Время вставки | Итоговый размер |
+|----------|---------------|-----------------|
+| Без сжатия (external) | 1245 мс | 13 MB |
+| pglz | 1567 мс | 9.2 MB |
+| lz4 | 987 мс | 8.7 MB |
+
+Выводы:
+- `lz4` показал лучшее соотношение скорости и степени сжатия
+- `pglz` сжимает хорошо, но работает медленнее
+- Без сжатия данные занимают больше всего места, но вставка происходит быстрее, чем при `pglz`
+
+---
+
+ Выводы
+
+В ходе выполнения лабораторной работы:
+
+
+ Ключевые моменты:
+
+- Сегменты файлов по 1 ГБ — историческое ограничение для совместимости с файловыми системами
+- TOAST (The Oversized-Attribute Storage Technique) позволяет хранить значения, не помещающиеся на одну страницу
+- TOAST-таблица создается автоматически для каждой таблицы с потенциально «длинными» типами данных
+- Стратегия `external` отключает сжатие, но сохраняет данные в TOAST — полезно для уже сжатых данных
+- TOAST-значения хранятся прозрачно для приложения: при обращении к «длинному» полю PostgreSQL автоматически «склеивает» фрагменты
+- Размеры на разных уровнях (объекты vs файловая система) могут различаться из-за служебных файлов и метаданных
+
+ Рекомендации:
+
+- Для уже сжатых данных (изображения, архивы) используйте стратегию `external`, чтобы избежать двойного сжатия
+- Для достижения максимальной производительности чтения/записи TOAST рассмотрите использование `lz4` вместо `pglz`
+- При оценке занимаемого места учитывайте не только `pg_total_relation_size`, но и TOAST-часть
+- Никогда не редактируйте файлы TOAST напрямую — это может привести к повреждению данных
+
+---
+
+
