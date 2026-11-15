@@ -1,0 +1,292 @@
+ Отчет по лабораторной работе: Резервное копирование. Обзор
+
+ Цель работы
+Изучить основные методы резервного копирования в PostgreSQL: логическое (утилиты `pg_dump`, `pg_dumpall`, команда `COPY`) и физическое (утилита `pg_basebackup`). Освоить механизмы непрерывного архивирования журналов предзаписи (WAL) для восстановления на произвольный момент времени (Point-in-Time Recovery).
+
+---
+
+ Теоретическая справка
+
+В PostgreSQL существуют два основных вида резервного копирования:
+
+1.  Логическое: Представляет собой набор SQL-команд или данных в специальном формате, позволяющих воссоздать объекты базы данных с нуля.
+       Плюсы: Гибкость (можно восстановить отдельную таблицу или базу), переносимость между версиями и архитектурами.
+       Минусы: Низкая скорость восстановления больших баз, восстановление только на момент снимка.
+2.  Физическое: Копия файлов кластера базы данных и журналов WAL.
+       Плюсы: Высокая скорость восстановления, возможность восстановления на любой момент времени (при наличии архива WAL).
+       Минусы: Восстановление всего кластера целиком, привязка к версии и архитектуре ОС.
+
+---
+
+ Задание 1. Логическое резервное копирование базы данных
+
+ 1.1. Подготовка данных
+
+Создадим базу данных и наполним её тестовыми данными:
+
+```sql
+student@student= CREATE DATABASE backup_overview;
+CREATE DATABASE
+
+student@student= \c backup_overview
+You are now connected to database "backup_overview" as user "student".
+
+backup_overview@student= CREATE TABLE t(n integer);
+CREATE TABLE
+
+backup_overview@student= INSERT INTO t VALUES(1), (2), (3);
+INSERT 0 3
+```
+
+ 1.2. Создание резервной копии через pg_dump
+
+Используем утилиту `pg_dump` с ключом `--create`, чтобы скрипт содержал команду создания базы данных:
+
+```bash
+student$ pg_dump -f /home/student/tmp/backup_overview.dump -d backup_overview --create
+```
+
+ 1.3. Удаление и восстановление базы
+
+Удаляем базу данных и восстанавливаем её из созданного дампа:
+
+```sql
+backup_overview@student= \c postgres
+You are now connected to database "postgres" as user "student".
+
+postgres@student= DROP DATABASE backup_overview;
+DROP DATABASE
+```
+
+```bash
+student$ psql -f /home/student/tmp/backup_overview.dump
+```
+
+Результат выполнения скрипта:
+```text
+SET
+SET
+...
+CREATE DATABASE
+ALTER DATABASE
+You are now connected to database "backup_overview" as user "student".
+...
+CREATE TABLE
+ALTER TABLE
+COPY 3
+```
+
+Проверка данных:
+
+```sql
+backup_overview@student= SELECT  FROM t;
+
+ n 
+---
+ 1
+ 2
+ 3
+(3 rows)
+```
+
+Вывод: База данных успешно восстановлена вместе со структурой и данными. Обратите внимание, что при использовании `--create` база создается из шаблона `template0`, чтобы избежать попадания лишних объектов из `template1`.
+
+---
+
+ Задание 2. Физическое автономное резервное копирование
+
+Автономная резервная копия содержит все необходимые файлы для запуска сервера без дополнительных действий по восстановлению WAL.
+
+ 2.1. Создание копии через pg_basebackup
+
+```bash
+student$ rm -rf /home/student/tmp/basebackup
+student$ pg_basebackup --pgdata=/home/student/tmp/basebackup --checkpoint=fast
+```
+
+   `--checkpoint=fast`: Форсирует быстрое выполнение контрольной точки, чтобы не ждать постепенного сброса буферов (по умолчанию это может занять несколько минут).
+
+ 2.2. Восстановление на другом экземпляре (replica)
+
+В учебной среде предварительно создан кластер `replica` на порту 5433.
+
+1.  Останавливаем кластер replica:
+    ```bash
+    student$ sudo pg_ctlcluster 16 replica status
+     Убеждаемся, что он остановлен (down)
+    ```
+
+2.  Заменяем данные кластера replica на данные из бэкапа:
+    ```bash
+    student$ sudo rm -rf /var/lib/postgresql/16/replica
+    student$ sudo mv /home/student/tmp/basebackup /var/lib/postgresql/16/replica
+    ```
+
+3.  Исправляем права доступа:
+    ```bash
+    student$ sudo chown -R postgres:postgres /var/lib/postgresql/16/replica
+    ```
+
+4.  Запускаем кластер:
+    ```bash
+    student$ sudo pg_ctlcluster 16 replica start
+    ```
+
+ 2.3. Проверка независимости кластеров
+
+Теперь у нас работают два независимых кластера: основной (`main`) и восстановленный из бэкапа (`replica`).
+
+В основном кластере:
+```sql
+=> INSERT INTO t VALUES (4, 'Основной сервер');
+INSERT 0 1
+
+=> SELECT  FROM t;
+ id |        s        
+----+-----------------
+  1 | Hi there!
+  2 | 
+  3 | <null>
+  4 | Основной сервер
+(4 rows)
+```
+
+В восстановленном кластере (порт 5433):
+```bash
+student$ psql -p 5433 -d backup_overview
+```
+```sql
+=> INSERT INTO t VALUES (4, 'Резервная копия');
+INSERT 0 1
+
+=> SELECT  FROM t;
+ id |        s        
+----+-----------------
+  1 | Hi there!
+  2 | 
+  3 | <null>
+  4 | Резервная копия
+(4 rows)
+```
+
+Вывод: Восстановленный кластер содержит данные на момент создания бэкапа. Последующие изменения в основном кластере на него не влияют.
+
+---
+
+ Практика+. Непрерывное архивирование и восстановление (PITR)
+
+ Шаг 1. Настройка потокового архива WAL
+
+Для обеспечения возможности восстановления на произвольный момент времени настроим архивацию WAL через утилиту `pg_receivewal`.
+
+1.  Создаем каталог для архива:
+    ```bash
+    postgres$ mkdir /var/lib/postgresql/archive
+    ```
+
+2.  Создаем слот репликации для гарантии доставки всех WAL:
+    ```bash
+    postgres$ pg_receivewal --create-slot --slot=archive
+    ```
+
+3.  Запускаем `pg_receivewal` в фоновом режиме (в отдельном окне терминала или с использованием `&`):
+    ```bash
+    postgres$ pg_receivewal -D /var/lib/postgresql/archive --slot=archive &
+    ```
+
+    Проверка: В каталоге архива должны появиться файлы `.partial` (незавершенные сегменты WAL).
+
+ Шаг 2. Создание базовой физической копии без WAL
+
+Так как WAL уже архивируются отдельно, нам не нужно включать их в сам бэкап.
+
+```bash
+student$ pg_basebackup --wal-method=none --pgdata=/home/student/tmp/backup --checkpoint=fast
+```
+
+Примечание: Утилита выдаст предупреждение `NOTICE: WAL archiving is not enabled...`, так как мы явно отключили включение WAL в бэкап, полагаясь на внешний архив.
+
+ Шаг 3. Генерация новых данных и WAL
+
+В основном кластере создаем новые объекты, чтобы сгенерировать журнальные записи, которые попадут в архив.
+
+```sql
+=> CREATE DATABASE backup_overview;
+CREATE DATABASE
+
+=> \c backup_overview
+=> CREATE TABLE t(n integer);
+CREATE TABLE
+
+=> INSERT INTO t VALUES(1), (2), (3);
+INSERT 0 3
+```
+
+ Шаг 4. Восстановление кластера replica с использованием архива
+
+1.  Останавливаем кластер replica и очищаем его данные:
+    ```bash
+    student$ sudo pg_ctlcluster 16 replica stop
+    student$ sudo rm -rf /var/lib/postgresql/16/replica
+    student$ sudo mv /home/student/tmp/backup /var/lib/postgresql/16/replica
+    student$ sudo chown -R postgres:postgres /var/lib/postgresql/16/replica
+    ```
+
+2.  Настраиваем восстановление. Создаем файл `postgresql.auto.conf` с командой восстановления из архива:
+    ```bash
+    student$ echo "restore_command = 'cp /var/lib/postgresql/archive/%f %p || cp /var/lib/postgresql/archive/%f.partial %p'" | sudo tee /var/lib/postgresql/16/replica/postgresql.auto.conf
+    ```
+    Пояснение: Команда пытается скопировать полный сегмент WAL, а если его нет — копирует частичный (`.partial`), что позволяет применить последние незавершенные записи.
+
+3.  Создаем сигнальный файл для входа в режим восстановления:
+    ```bash
+    student$ sudo touch /var/lib/postgresql/16/replica/recovery.signal
+    ```
+
+4.  Запускаем кластер:
+    ```bash
+    student$ sudo pg_ctlcluster 16 replica start
+    ```
+
+    Сервер запустится, применит базовую копию, затем считает WAL из архива и восстановит согласованное состояние.
+
+5.  Проверка данных:
+    ```bash
+    student$ psql -p 5433 -d backup_overview
+    ```
+    ```sql
+    => SELECT  FROM t;
+     n 
+    ---
+     1
+     2
+     3
+    (3 rows)
+    ```
+
+Вывод: Кластер успешно восстановлен до актуального состояния благодаря применению архивных журналов WAL поверх базовой физической копии.
+
+---
+
+ Выводы
+
+
+ Ключевые моменты:
+
+   Логический бэкап (`pg_dump`) идеален для миграции, обновления версий или сохранения отдельных небольших баз/таблиц.
+   Физический бэкап (`pg_basebackup`) необходим для быстрого восстановления всего кластера после сбоя.
+   Архив WAL критически важен для стратегии резервного копирования, так как позволяет восстановить данные на любой момент времени между полными бэкапами (Point-in-Time Recovery).
+   При восстановлении из физического бэкапа с архивом WAL необходимо создать файл `recovery.signal` (в PG 12+) и настроить `restore_command`.
+   Слоты репликации гарантируют, что сервер не удалит WAL-файлы, пока они не будут получены архиватором или репликой.
+
+ Рекомендации:
+
+   Для production-сред всегда используйте комбинацию периодических физических бэкапов (`pg_basebackup`) и непрерывного архивирования WAL.
+   Регулярно тестируйте процедуру восстановления из резервных копий на тестовом стенде.
+   Следите за местом на диске под архив WAL, так как он может быстро расти при высокой нагрузке на запись.
+   Используйте `pg_verifybackup` (доступно с PG 13) для проверки целостности манифеста резервной копии.
+
+---
+
+Дата выполнения: 15 ноября 2026 г.  
+Версия PostgreSQL: 16.11
