@@ -1,0 +1,206 @@
+ Отчет по лабораторной работе: Инструментарий. Установка и управление сервером PostgreSQL 16
+
+ Цель работы
+Освоить установку PostgreSQL из пакетов и исходных кодов, научиться управлять сервером, а также включить расчет контрольных сумм для защиты данных.
+
+---
+
+ Задание 1. Включение расчета контрольных сумм в кластере
+
+ 1.1. Остановка сервера
+
+```bash
+student$ sudo pg_ctlcluster 16 main stop
+```
+
+Проверка статуса:
+
+```bash
+student$ pg_lsclusters 16 main
+
+Ver Cluster Port Status Owner    Data directory              Log file
+16  main    5432 down   postgres /var/lib/postgresql/16/main  /var/log/postgresql/postgresql-16-main.log
+```
+
+Результат: Сервер успешно остановлен, статус `down`.
+
+---
+
+ 1.2. Проверка расчета контрольных сумм
+
+```bash
+student$ sudo /usr/lib/postgresql/16/bin/pg_checksums --check -D /var/lib/postgresql/16/main
+pg_checksums: error: data checksums are not enabled in cluster
+```
+
+Результат: Контрольные суммы не включены.
+
+---
+
+ 1.3. Включение расчета контрольных сумм
+
+```bash
+student$ sudo /usr/lib/postgresql/16/bin/pg_checksums --enable -D /var/lib/postgresql/16/main
+
+Checksum operation completed
+
+Files scanned:   1244
+Blocks scanned:  3749
+Files written:   1026
+Blocks written:  3749
+
+pg_checksums: syncing data directory
+pg_checksums: updating control file
+
+Checksums enabled in cluster
+```
+
+Результат: Расчет контрольных сумм успешно включен. Просканировано 1244 файла и 3749 блоков данных.
+
+---
+
+ 1.4. Запуск сервера
+
+```bash
+student$ sudo pg_ctlcluster 16 main start
+```
+
+Проверка работы сервера:
+
+```bash
+student$ sudo pg_ctlcluster 16 main status
+
+pg_ctl: server is running (PID: 58989)
+/usr/lib/postgresql/16/bin/postgres "-D" "/var/lib/postgresql/16/main" "-c" "config_file=/etc/postgresql/16/main/postgresql.conf"
+```
+
+Результат: Сервер успешно запущен и готов к работе.
+
+---
+
+ Задание 2. Сборка PostgreSQL из исходных кодов
+
+ 2.1. Распаковка архива с исходными кодами
+
+```bash
+student$ cd
+student$ tar xzf /home/student/postgresql-16.0.tar.gz
+student$ ls -l /home/student/postgresql-16.0
+
+total 876
+-rw-r--r-- 1 student student    365 сен 11  2023 aclocal.m4
+drwxrwxr-x 2 student student   4096 сен 11  2023 config
+-rwxr-xr-x 1 student student 584200 сен 11  2023 configure
+-rw-r--r-- 1 student student  87156 сен 11  2023 configure.ac
+drwxrwxr-x 6 student student   4096 сен 11  2023 contrib
+-rw-r--r-- 1 student student   1192 сен 11  2023 COPYRIGHT
+drwxrwxr-x 3 student student   4096 сен 11  2023 doc
+-rw-r--r-- 1 student student   4288 сен 11  2023 GNUmakefile.in
+-rw-r--r-- 1 student student    277 сен 11  2023 HISTORY
+-rw-r--r-- 1 student student  64592 сен 11  2023 INSTALL
+-rw-r--r-- 1 student student   1875 сен 11  2023 Makefile
+-rw-r--r-- 1 student student 101920 сен 11  2023 meson.build
+-rw-r--r-- 1 student student   6266 сен 11  2023 meson_options.txt
+-rw-r--r-- 1 student student   1213 сен 11  2023 README
+drwxrwxr-x 16 student student  4096 сен 11  2023 src
+```
+
+---
+
+ 2.2. Конфигурация сборки
+
+```bash
+student$ cd /home/student/postgresql-16.0
+student$ ./configure --prefix=/home/student/pgsql16 --with-pgport=5555
+```
+
+Параметры конфигурации:
+- `--prefix=/home/student/pgsql16` — каталог установки
+- `--with-pgport=5555` — порт сервера (вместо стандартного 5432)
+
+---
+
+ 2.3. Сборка сервера
+
+```bash
+student$ make
+```
+
+Время компиляции: несколько минут (зависит от мощности компьютера).
+
+---
+
+ 2.4. Установка сервера
+
+```bash
+student$ make install
+```
+
+---
+
+ 2.5. Сборка и установка расширений
+
+```bash
+student$ cd contrib
+student$ make
+student$ make install
+```
+
+---
+
+ 2.6. Создание кластера баз данных
+
+```bash
+student$ mkdir /home/student/pgsql16/data
+student$ export PGDATA=/home/student/pgsql16/data
+student$ export PATH=/home/student/pgsql16/bin:$PATH
+
+student$ initdb -U postgres -k -D /home/student/pgsql16/data
+```
+
+Параметры `initdb`:
+- `-U postgres` — имя суперпользователя
+- `-k` — включение контрольных сумм
+- `-D` — каталог данных
+
+---
+
+ 2.7. Запуск сервера
+
+```bash
+student$ pg_ctl start -l /home/student/logfile
+```
+
+Проверка работы:
+
+```bash
+student$ psql -U postgres -p 5555 -c 'SELECT now();'
+
+              now
+-------------------------------
+ 2026-04-10 17:02:06.104584+03
+(1 row)
+```
+
+Результат: Сервер успешно запущен на порту 5555 и отвечает на запросы.
+
+---
+
+ 2.8. Остановка сервера
+
+```bash
+student$ pg_ctl stop
+```
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+- Контрольные суммы позволяют оперативно обнаруживать повреждения данных
+- Сборка из исходных кодов дает гибкость в настройке параметров
+- В Ubuntu управление сервером осуществляется через `pg_ctlcluster`, а не напрямую через `pg_ctl`
+- Кластер баз данных должен принадлежать не-root пользователю (обычно `postgres`)
+
+---
+
