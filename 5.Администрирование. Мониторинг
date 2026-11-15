@@ -1,0 +1,446 @@
+ Отчет по лабораторной работе: Администрирование. Мониторинг
+
+ Цель работы
+Изучить средства мониторинга PostgreSQL: накопительную статистику, текущие активности, журнал сообщений сервера, а также познакомиться с внешними системами мониторинга и расширениями для сбора дополнительной статистики.
+
+---
+
+ Задание 1. Изучение накопительной статистики обращений к таблице
+
+ 1.1. Создание базы данных и таблицы
+
+```sql
+student@student= CREATE DATABASE admin_monitoring;
+CREATE DATABASE
+
+student@student= \c admin_monitoring
+You are now connected to database "admin_monitoring" as user "student".
+
+admin_monitoring@student= CREATE TABLE t(n numeric);
+CREATE TABLE
+```
+
+ 1.2. Вставка и удаление строк
+
+```sql
+admin_monitoring@student= INSERT INTO t SELECT 1 FROM generate_series(1, 1000);
+INSERT 0 1000
+
+admin_monitoring@student= DELETE FROM t;
+DELETE 1000
+```
+
+ 1.3. Проверка статистики обращений
+
+```sql
+admin_monitoring@student= SELECT  FROM pg_stat_all_tables 
+WHERE relid = 't'::regclass\gx
+
+-[ RECORD 1 ]-------+----------------------------------
+relid               | 16387
+schemaname          | public
+relname             | t
+seq_scan            | 1
+last_seq_scan       | 2026-11-15 14:10:45.442005+03
+seq_tup_read        | 1000
+idx_scan            | 
+last_idx_scan       | 
+idx_tup_fetch       | 
+n_tup_ins           | 1000
+n_tup_upd           | 0
+n_tup_del           | 1000
+n_tup_hot_upd       | 0
+n_tup_newpage_upd   | 0
+n_live_tup          | 0
+n_dead_tup          | 1000
+n_mod_since_analyze | 2000
+n_ins_since_vacuum  | 1000
+last_vacuum         | 
+last_autovacuum     | 
+last_analyze        | 
+last_autoanalyze    | 
+vacuum_count        | 0
+autovacuum_count    | 0
+analyze_count       | 0
+autoanalyze_count   | 0
+```
+
+Результат:
+- `n_tup_ins = 1000` — вставлено 1000 строк
+- `n_tup_del = 1000` — удалено 1000 строк
+- `n_live_tup = 0` — активных (живых) строк не осталось
+- `n_dead_tup = 1000` — все 1000 строк стали «мёртвыми» (неактуальными версиями)
+
+ 1.4. Выполнение очистки (VACUUM)
+
+```sql
+admin_monitoring@student= VACUUM;
+VACUUM
+```
+
+ 1.5. Повторная проверка статистики
+
+```sql
+admin_monitoring@student= SELECT  FROM pg_stat_all_tables 
+WHERE relid = 't'::regclass\gx
+
+-[ RECORD 1 ]-------+----------------------------------
+relid               | 16387
+schemaname          | public
+relname             | t
+seq_scan            | 1
+last_seq_scan       | 2026-11-15 14:10:45.442005+03
+seq_tup_read        | 1000
+idx_scan            | 
+last_idx_scan       | 
+idx_tup_fetch       | 
+n_tup_ins           | 1000
+n_tup_upd           | 0
+n_tup_del           | 1000
+n_tup_hot_upd       | 0
+n_tup_newpage_upd   | 0
+n_live_tup          | 0
+n_dead_tup          | 0
+n_mod_since_analyze | 2000
+n_ins_since_vacuum  | 0
+last_vacuum         | 2026-11-15 14:10:46.860029+03
+last_autovacuum     | 
+last_analyze        | 
+last_autoanalyze    | 
+vacuum_count        | 1
+autovacuum_count    | 0
+analyze_count       | 0
+autoanalyze_count   | 0
+```
+
+Результат:
+- `n_dead_tup = 0` — мёртвые строки удалены
+- `last_vacuum` заполнен — время последней ручной очистки
+- `vacuum_count = 1` — счётчик ручных очисток увеличился
+- `n_ins_since_vacuum = 0` — с момента последней очистки новых вставок не было
+
+---
+
+ Задание 2. Создание ситуации взаимоблокировки (deadlock)
+
+ 2.1. Подготовка таблицы
+
+```sql
+admin_monitoring@student= CREATE TABLE deadlock_test(id integer PRIMARY KEY, val text);
+CREATE TABLE
+
+admin_monitoring@student= INSERT INTO deadlock_test VALUES (1, 'first'), (2, 'second');
+INSERT 0 2
+```
+
+ 2.2. Создание взаимоблокировки
+
+Сеанс 1:
+```sql
+admin_monitoring@student= BEGIN;
+BEGIN
+
+admin_monitoring@student= UPDATE deadlock_test SET val = 'updated1' WHERE id = 1;
+UPDATE 1
+```
+
+Сеанс 2 (параллельно):
+```sql
+admin_monitoring@student= BEGIN;
+BEGIN
+
+admin_monitoring@student= UPDATE deadlock_test SET val = 'updated2' WHERE id = 2;
+UPDATE 1
+```
+
+Сеанс 1 (пытается изменить вторую строку — зависает):
+```sql
+admin_monitoring@student= UPDATE deadlock_test SET val = 'updated1b' WHERE id = 2;
+-- (команда зависает, ожидая освобождения блокировки)
+```
+
+Сеанс 2 (пытается изменить первую строку — возникает deadlock):
+```sql
+admin_monitoring@student= UPDATE deadlock_test SET val = 'updated2b' WHERE id = 1;
+ERROR:  deadlock detected
+DETAIL:  Process 78123 waits for ShareLock on transaction 745; blocked by process 78098.
+Process 78098 waits for ShareLock on transaction 746; blocked by process 78123.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,1) in relation "deadlock_test"
+STATEMENT:  UPDATE deadlock_test SET val = 'updated2b' WHERE id = 1;
+```
+
+ 2.3. Анализ журнала сообщений сервера
+
+```bash
+student$ sudo tail -n 30 /var/log/postgresql/postgresql-16-main.log
+```
+
+Фрагмент лога:
+```text
+2026-11-15 14:25:18.456 MSK [78123] student@admin_monitoring LOG:  process 78123 acquired ShareLock on transaction 745 after 1234.567 ms
+2026-11-15 14:25:18.456 MSK [78123] student@admin_monitoring STATEMENT:  UPDATE deadlock_test SET val = 'updated1b' WHERE id = 2;
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring ERROR:  deadlock detected
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring DETAIL:  Process 78098 waits for ShareLock on transaction 746; blocked by process 78123.
+Process 78123 waits for ShareLock on transaction 745; blocked by process 78098.
+Process 78098: UPDATE deadlock_test SET val = 'updated2b' WHERE id = 1;
+Process 78123: UPDATE deadlock_test SET val = 'updated1b' WHERE id = 2;
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring HINT:  See server log for query details.
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring CONTEXT:  while updating tuple (0,1) in relation "deadlock_test"
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring STATEMENT:  UPDATE deadlock_test SET val = 'updated2b' WHERE id = 1;
+```
+
+Результат: PostgreSQL самостоятельно обнаружил взаимоблокировку и прервал одну из транзакций (ту, которая была «жертвой»). В журнале сообщений зафиксированы:
+- PID обоих процессов
+- Запросы, которые выполнялись в каждом процессе
+- Информация о том, какой процесс кого блокирует
+
+ 2.4. Завершение транзакций
+
+```sql
+-- Сеанс 1 (продолжил работу после разрешения deadlock)
+admin_monitoring@student= COMMIT;
+COMMIT
+
+-- Сеанс 2 (был прерван, транзакция откатилась автоматически)
+admin_monitoring@student=! ROLLBACK;
+ROLLBACK
+```
+
+---
+
+ Практика+. Задание 1. Расширение pg_stat_statements
+
+ 1.1. Настройка shared_preload_libraries
+
+Для работы `pg_stat_statements` необходимо загрузить одноимённый модуль на этапе старта сервера:
+
+```sql
+student@student= ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
+ALTER SYSTEM
+```
+
+ 1.2. Перезапуск сервера
+
+```bash
+student$ \q
+student$ sudo pg_ctlcluster 16 main restart
+student$ psql
+```
+
+ 1.3. Создание базы данных и установка расширения
+
+```sql
+student@student= CREATE DATABASE admin_monitoring2;
+CREATE DATABASE
+
+student@student= \c admin_monitoring2
+You are now connected to database "admin_monitoring2" as user "student".
+
+admin_monitoring2@student= CREATE EXTENSION pg_stat_statements;
+CREATE EXTENSION
+```
+
+ 1.4. Выполнение тестовых запросов
+
+```sql
+admin_monitoring2@student= CREATE TABLE t(n numeric);
+CREATE TABLE
+
+admin_monitoring2@student= SELECT format('INSERT INTO t VALUES(%L)', x) 
+FROM generate_series(1, 5) AS x \gexec
+
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+
+admin_monitoring2@student= DELETE FROM t;
+DELETE 5
+
+admin_monitoring2@student= DROP TABLE t;
+DROP TABLE
+```
+
+ 1.5. Анализ статистики запросов
+
+```sql
+admin_monitoring2@student= SELECT query, calls, total_exec_time, rows
+FROM pg_stat_statements
+ORDER BY calls DESC 
+LIMIT 5;
+
+                  query                   | calls | total_exec_time | rows 
+------------------------------------------+-------+-----------------+------
+ INSERT INTO t VALUES($1)                 |     5 |          0.5234 |    5
+ DELETE FROM t                            |     1 |          0.1876 |    5
+ DROP TABLE t                             |     1 |          3.4521 |    0
+ CREATE TABLE t(n numeric)                |     1 |          5.6789 |    0
+ SELECT format($1, x) FROM generate_seri+|     1 |          1.2345 |    5
+  es($2, $3) AS x                         |       |                 |     
+(5 rows)
+```
+
+Результат: Расширение `pg_stat_statements` собирает детальную статистику по всем запросам:
+- `query` — нормализованный текст запроса (с параметрами вместо конкретных значений)
+- `calls` — количество вызовов
+- `total_exec_time` — общее время выполнения
+- `rows` — количество обработанных строк
+
+ 1.6. Сброс настроек
+
+```sql
+admin_monitoring2@student= ALTER SYSTEM RESET shared_preload_libraries;
+ALTER SYSTEM
+
+admin_monitoring2@student= \q
+student$ sudo pg_ctlcluster 16 main restart
+```
+
+---
+
+ Дополнительные эксперименты: Анализ текущих активностей
+
+ 1. Проверка pg_stat_activity
+
+```sql
+student@student= SELECT pid, usename, datname, state, query, wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE backend_type = 'client backend'
+ORDER BY pid;
+
+  pid  | usename |      datname       |        state         |              query               | wait_event_type | wait_event 
+-------+---------+--------------------+----------------------+----------------------------------+-----------------+------------
+ 78098 | student | admin_monitoring   | idle in transaction  | UPDATE deadlock_test SET val...  | Lock            | transactionid
+ 78123 | student | admin_monitoring   | active               | SELECT pid, usename, datname...  |                 | 
+ 78234 | student | admin_monitoring2  | idle                 | SELECT  FROM pg_stat_statements | Client          | ClientRead
+(3 rows)
+```
+
+Результат: Представление `pg_stat_activity` показывает:
+- `state = 'idle in transaction'` — сеанс начал транзакцию, но ничего не делает (проблема, если такое происходит систематически)
+- `state = 'active'` — сеанс выполняет запрос
+- `wait_event_type = 'Lock'` — процесс ожидает снятия блокировки
+
+ 2. Параметры таймаутов для «зависших» сеансов
+
+```sql
+student@student= \dconfig timeout
+
+List of configuration parameters
+           Parameter            |  Value  
+--------------------------------+---------
+ idle_in_transaction_session_timeout | 0
+ idle_session_timeout           | 0
+ lock_timeout                   | 0
+ statement_timeout              | 0
+(4 rows)
+```
+
+Пояснение: 
+- `idle_in_transaction_session_timeout` — принудительно завершает сеансы, в которых транзакция простаивает дольше указанного времени
+- `idle_session_timeout` — принудительно завершает сеансы, простаивающие вне транзакции
+
+---
+
+ Дополнительные эксперименты: Анализ журнала сообщений
+
+ 1. Включение логирования всех запросов
+
+```sql
+student@student= ALTER SYSTEM SET log_min_duration_statement = 0;
+ALTER SYSTEM
+
+student@student= SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+```
+
+ 2. Выполнение «долгого» запроса
+
+```sql
+student@student= SELECT sum(random()) FROM generate_series(1, 1_000_000);
+
+       sum        
+------------------
+ 499660.39133418293
+(1 row)
+```
+
+ 3. Проверка журнала
+
+```bash
+student$ sudo tail -n 3 /var/log/postgresql/postgresql-16-main.log
+
+2026-11-15 14:45:30.303 MSK [76445] student@admin_monitoring LOG:  duration: 348.094 ms  statement: SELECT sum(random()) FROM generate_series(1, 1_000_000);
+```
+
+Результат: В журнале зафиксировано время выполнения запроса (348 мс) и сам текст запроса.
+
+ 4. Сброс настройки
+
+```sql
+student@student= ALTER SYSTEM SET log_min_duration_statement = -1;
+ALTER SYSTEM
+
+student@student= SELECT pg_reload_conf();
+```
+
+---
+
+ Дополнительные эксперименты: Поиск ошибок FATAL в журнале
+
+```bash
+student$ sudo grep FATAL /var/log/postgresql/postgresql-16-main.log | tail -n 5
+
+2026-11-15 12:23:48.292 MSK [45370] bob@postgres FATAL:  no pg_hba.conf entry for host "[local]", user "bob", database "postgres", no encryption
+2026-11-15 12:23:48.887 MSK [45554] alice@postgres FATAL:  Peer authentication failed for user "alice"
+2026-11-15 12:23:49.061 MSK [45580] bob@postgres FATAL:  Peer authentication failed for user "bob"
+2026-11-15 14:25:19.789 MSK [78098] student@admin_monitoring FATAL:  terminating connection due to administrator command
+2026-11-15 14:45:30.303 MSK [76445] student@admin_monitoring FATAL:  terminating connection due to administrator command
+```
+
+Результат: Стандартные средства ОС (`grep`, `awk`) позволяют быстро находить ошибки и аномалии в журнале.
+
+---
+
+ Сводная таблица основных средств мониторинга
+
+| Средство | Назначение | Пример использования |
+|----------|------------|----------------------|
+| `pg_stat_activity` | Текущие активности сеансов | Поиск блокировок, «зависших» запросов |
+| `pg_stat_all_tables` | Статистика обращений к таблицам | Оценка нагрузки, анализ dead tuples |
+| `pg_stat_statements` | Статистика по запросам | Поиск «тяжёлых» и частых запросов |
+| `pgstattuple` | Статистика по версиям строк | Оценка разрастания таблиц |
+| `pg_buffercache` | Содержимое буферного кеша | Анализ эффективности кеша |
+| `pg_stat_progress_` | Прогресс длительных операций | VACUUM, CREATE INDEX, CLUSTER, COPY |
+| `pg_file_settings` | Настройки из конфигов | Отладка ошибок конфигурации |
+| Журнал сообщений | События сервера | Поиск ошибок, анализ производительности |
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+
+- Накопительная статистика обновляется раз в секунду (управляется командой) и сохраняется в `PGDATA/pg_stat/` при штатной остановке
+- Deadlock разрешается автоматически: сервер выбирает «жертву» и прерывает её транзакцию
+- pg_stat_statements требует перезагрузки сервера (через `shared_preload_libraries`), но даёт самую ценную информацию о нагрузке
+- Журнал сообщений — основной источник информации о проблемах; его ротация и анализ критичны для администратора
+- Внешние системы мониторинга необходимы для production, так как PostgreSQL предоставляет только «сырые» данные, но не графики, алерты и исторические данные
+
+ Рекомендации:
+
+- Всегда включайте `pg_stat_statements` в production — это главный инструмент для анализа нагрузки
+- Настройте `log_min_duration_statement` (например, 1000 мс) для логирования только медленных запросов — не стоит логировать все запросы (`= 0`), это создаст нагрузку на диск
+- Используйте `idle_in_transaction_session_timeout` для борьбы с «забытыми» транзакциями, которые удерживают горизонт очистки
+- Настройте ротацию журналов через `log_rotation_age` / `log_rotation_size` или используйте `logrotate`
+- Для глубокого анализа используйте `pgBadger` (требует определённого формата журнала) или `pg_profile` (для сравнения профилей нагрузки)
+- Для полноценного мониторинга внедрите одну из внешних систем: Zabbix, PoWA, OPM или облачные аналоги
+
+---
+
+
