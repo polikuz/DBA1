@@ -1,0 +1,330 @@
+ Отчет по лабораторной работе: Организация данных. Системный каталог
+
+ Цель работы
+Изучить системный каталог PostgreSQL, научиться работать с метаданными через SQL-запросы и команды psql, понять структуру хранения информации об объектах кластера баз данных.
+
+---
+
+ Задание 1. Получение описания таблицы pg_class
+
+ 1.1. Выполнение команды описания
+
+```sql
+student@student= \d pg_class
+
+                                        Table "pg_catalog.pg_class"
+       Column        |   Type    | Collation | Nullable |          Default          | Storage  | Stats target | Description 
+---------------------+-----------+-----------+----------+---------------------------+----------+--------------+-------------
+ oid                 | oid       |           | not null |                           | plain    |              | 
+ relname             | name      |           | not null |                           | plain    |              | 
+ relnamespace        | oid       |           | not null |                           | plain    |              | 
+ reltype             | oid       |           | not null |                           | plain    |              | 
+ reloftype           | oid       |           | not null | 0                         | plain    |              | 
+ relowner            | oid       |           | not null |                           | plain    |              | 
+ relam               | oid       |           | not null |                           | plain    |              | 
+ relfilenode         | oid       |           | not null |                           | plain    |              | 
+ reltablespace       | oid       |           | not null |                           | plain    |              | 
+ relpages            | integer   |           | not null |                           | plain    |              | 
+ reltuples           | real      |           | not null |                           | plain    |              | 
+ relallvisible       | integer   |           | not null |                           | plain    |              | 
+ reltoastrelid       | oid       |           | not null |                           | plain    |              | 
+ relhasindex         | boolean   |           | not null |                           | plain    |              | 
+ relisshared         | boolean   |           | not null |                           | plain    |              | 
+ relpersistence      | "char"    |           | not null |                           | extended |              | 
+ relkind             | "char"    |           | not null |                           | extended |              | 
+ relnatts            | smallint  |           | not null |                           | plain    |              | 
+ relchecks           | smallint  |           | not null |                           | plain    |              | 
+ relhasrules         | boolean   |           | not null |                           | plain    |              | 
+ relhastriggers      | boolean   |           | not null |                           | plain    |              | 
+ relhassubclass      | boolean   |           | not null |                           | plain    |              | 
+ relrowsecurity      | boolean   |           | not null |                           | plain    |              | 
+ relforcerowsecurity | boolean   |           | not null |                           | plain    |              | 
+ relispopulated      | boolean   |           | not null |                           | plain    |              | 
+ relreplident        | "char"    |           | not null |                           | extended |              | 
+ relispartition      | boolean   |           | not null |                           | plain    |              | 
+ relrewrite          | oid       |           | not null |                           | plain    |              | 
+ relfrozenxid        | xid       |           | not null |                           | plain    |              | 
+ relminmxid          | xid       |           | not null |                           | plain    |              | 
+ relacl              | aclitem[] |           |          |                           | extended |              | 
+ reloptions          | text[]    |           |          |                           | extended |              | 
+ relpartbound        | pg_node_tree |        |          |                           | extended |              | 
+Indexes:
+    "pg_class_oid_index" PRIMARY KEY, btree (oid)
+    "pg_class_relname_nsp_index" UNIQUE CONSTRAINT, btree (relname, relnamespace)
+    "pg_class_tblspc_relfilenode_index" btree (reltablespace, relfilenode)
+Access method: heap
+```
+
+Результат: Получено полное описание таблицы `pg_class`, содержащей информацию о всех отношениях (таблицах, представлениях, индексах, последовательностях) в базе данных.
+
+---
+
+ Задание 2. Получение подробного описания представления pg_tables
+
+ 2.1. Выполнение команды описания
+
+```sql
+student@student= \d+ pg_tables
+
+                                          View "pg_catalog.pg_tables"
+   Column    |  Type   | Collation | Nullable | Default | Storage  | Description 
+-------------+---------+-----------+----------+---------+----------+-------------
+ schemaname  | name    |           |          |         | plain    | 
+ tablename   | name    |           |          |         | plain    | 
+ tableowner  | name    |           |          |         | plain    | 
+ tablespace  | name    |           |          |         | plain    | 
+ hasindexes  | boolean |           |          |         | plain    | 
+ hasrules    | boolean |           |          |         | plain    | 
+ hastriggers | boolean |           |          |         | plain    | 
+ rowsecurity | boolean |           |          |         | plain    | 
+
+View definition:
+ SELECT n.nspname AS schemaname,
+    c.relname AS tablename,
+    pg_get_userbyid(c.relowner) AS tableowner,
+    t.spcname AS tablespace,
+    c.relhasindex AS hasindexes,
+    c.relhasrules AS hasrules,
+    c.relhastriggers AS hastriggers,
+    c.relrowsecurity AS rowsecurity
+   FROM pg_class c
+     LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
+  WHERE c.relkind = ANY (ARRAY['r'::"char", 'p'::"char"]);
+```
+
+Результат: Получено подробное описание представления `pg_tables`, включая его определение (SQL-запрос), которое показывает, как представление объединяет данные из `pg_class`, `pg_namespace` и `pg_tablespace`.
+
+---
+
+ Задание 3. Создание базы данных и временной таблицы, получение полного списка схем
+
+ 3.1. Создание базы данных и подключение
+
+```sql
+student@student= CREATE DATABASE data_catalog;
+CREATE DATABASE
+
+student@student= \c data_catalog
+You are now connected to database "data_catalog" as user "student".
+```
+
+ 3.2. Создание временной таблицы
+
+```sql
+data_catalog@student= CREATE TEMP TABLE t(n integer);
+CREATE TABLE
+```
+
+ 3.3. Получение полного списка схем
+
+```sql
+data_catalog@student= \dnS
+
+        List of schemas
+  Name  |       Owner       
+--------+-------------------
+ pg_catalog | postgres
+ pg_temp_1  | student
+ pg_toast   | postgres
+ public     | pg_database_owner
+(4 rows)
+```
+
+Результат: Получен полный список схем в базе данных, включая системные:
+- `pg_catalog` — схема системного каталога
+- `pg_temp_1` — временная схема для текущего сеанса
+- `pg_toast` — схема для хранения больших объектов (TOAST)
+- `public` — стандартная схема для пользовательских объектов
+
+---
+
+ Задание 4. Получение списка представлений в схеме information_schema
+
+ 4.1. Запрос списка представлений
+
+```sql
+data_catalog@student= SELECT table_name 
+FROM information_schema.views 
+WHERE table_schema = 'information_schema'
+ORDER BY table_name;
+
+              table_name               
+---------------------------------------
+ attributes
+ character_sets
+ collation_character_set_applicability
+ collations
+ column_domain_usage
+ column_privileges
+ column_udt_usage
+ columns
+ data_type_privileges
+ domain_constraints
+ domain_udt_usage
+ domains
+ element_types
+ enabled_roles
+ information_schema_catalog_name
+ key_column_usage
+ parameters
+ referential_constraints
+ role_column_grants
+ role_routine_grants
+ role_table_grants
+ role_usage_grants
+ routines
+ schemata
+ sequences
+ sql_features
+ sql_implementation_info
+ sql_languages
+ sql_packages
+ sql_parts
+ sql_sizing
+ sql_sizing_profiles
+ table_constraints
+ table_privileges
+ tables
+ transforms
+ trigger_routine_usage
+ triggers
+ udt_privileges
+ usage_privileges
+ user_defined_types
+ user_mapping_options
+ user_mappings
+ view_column_usage
+ view_routine_usage
+ view_table_usage
+ views
+(47 rows)
+```
+
+Результат: Получен список из 47 представлений в схеме `information_schema`, которые соответствуют стандарту SQL и обеспечивают переносимый доступ к метаданным.
+
+---
+
+ Задание 5. Анализ команды \d+ pg_views
+
+ 5.1. Выполнение команды
+
+```sql
+data_catalog@student= \d+ pg_views
+
+                                        View "pg_catalog.pg_views"
+   Column    |  Type   | Collation | Nullable | Default | Storage  | Description 
+-------------+---------+-----------+----------+---------+----------+-------------
+ schemaname  | name    |           |          |         | plain    | 
+ viewname    | name    |           |          |         | plain    | 
+ viewowner   | name    |           |          |         | plain    | 
+ definition  | text    |           |          |         | extended |             | 
+
+View definition:
+ SELECT n.nspname AS schemaname,
+    c.relname AS viewname,
+    pg_get_userbyid(c.relowner) AS viewowner,
+    pg_get_viewdef(c.oid) AS definition
+   FROM pg_class c
+     LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'v'::"char";
+```
+
+ 5.2. Анализ выполняемых запросов
+
+Команда `\d+ pg_views` выполняет следующие действия:
+
+1. Запрос к системному каталогу: Обращается к таблице `pg_class` для получения информации о представлении `pg_views`
+2. JOIN с pg_namespace: Объединяет данные со схемой для получения имени схемы
+3. Извлечение определения: Использует функцию `pg_get_viewdef()` для получения SQL-определения представления
+4. Фильтрация: Отбирает только объекты типа 'v' (view/представление)
+
+Результат: Команда показывает структуру представления `pg_views`, которое предоставляет информацию о всех представлениях в базе данных, включая их определения.
+
+---
+
+ Дополнительные эксперименты: Работа с типами reg
+
+ 1. Создание тестовых объектов
+
+```sql
+data_catalog@student= CREATE TABLE employees(
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text,
+    manager integer
+);
+CREATE TABLE
+
+data_catalog@student= CREATE VIEW top_managers AS
+    SELECT  FROM employees WHERE manager IS NULL;
+CREATE VIEW
+
+data_catalog@student= CREATE TEMP TABLE emp_salaries(employee integer, salary numeric);
+CREATE TABLE
+```
+
+ 2. Использование типа regclass
+
+```sql
+data_catalog@student= SELECT a.attname, a.atttypid::regtype
+FROM pg_attribute a
+WHERE a.attrelid = 'employees'::regclass
+AND a.attnum > 0;
+
+ attname | atttypid  
+---------+-----------
+ id      | integer
+ name    | text
+ manager | integer
+(3 rows)
+```
+
+Результат: Тип `regclass` позволяет преобразовать текстовое имя таблицы в OID и упрощает запросы к системному каталогу.
+
+ 3. Список всех reg-типов
+
+```sql
+data_catalog@student= \dT reg
+
+       List of data types
+ Schema |      Name      |            Description             
+--------+----------------+------------------------------------
+ pg_catalog | regclass     | registered class
+ pg_catalog | regcollation | registered collation
+ pg_catalog | regconfig    | registered text search configuration
+ pg_catalog | regdictionary | registered text search dictionary
+ pg_catalog | regnamespace | registered namespace
+ pg_catalog | regoper      | registered operator
+ pg_catalog | regoperator  | registered operator (with args)
+ pg_catalog | regproc      | registered procedure
+ pg_catalog | regprocedure | registered procedure (with args)
+ pg_catalog | regrole      | registered role
+ pg_catalog | regtype      | registered type
+(11 rows)
+```
+
+Результат: PostgreSQL предоставляет 11 специальных типов `reg` для удобной работы с OID объектов системного каталога.
+
+---
+
+ Выводы
+
+
+ Ключевые моменты:
+
+- Системный каталог — это "метаданные о метаданных", хранящиеся в самой базе данных
+- pg_catalog содержит низкоуровневые таблицы с полной информацией об объектах
+- information_schema предоставляет стандартный SQL-интерфейс для переносимости между СУБД
+- reg-типы упрощают работу с OID, позволяя использовать имена объектов вместо числовых идентификаторов
+- Временные объекты хранятся в специальных схемах `pg_temp_N` и автоматически удаляются при завершении сеанса
+- Команды psql с префиксом `\d` предоставляют удобный интерфейс для быстрого просмотра структуры объектов
+
+ Рекомендации:
+
+- Для простых задач используйте команды psql (`\d`, `\dt`, `\dv` и т.д.)
+- Для сложных запросов к метаданным используйте представления системного каталога (`pg_tables`, `pg_views` и др.)
+- При необходимости переносимости между СУБД используйте `information_schema`
+- Используйте reg-типы для упрощения запросов к системному каталогу
+- Помните, что изменения в `template1` копируются во все новые базы данных
+
+
