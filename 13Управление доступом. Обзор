@@ -1,0 +1,588 @@
+ Отчет по лабораторной работе: Управление доступом. Обзор
+
+ Цель работы
+Изучить систему управления доступом в PostgreSQL: научиться создавать роли и назначать им атрибуты, настраивать подключение к серверу через `pg_hba.conf`, управлять привилегиями на объекты, использовать групповые роли и привилегии по умолчанию.
+
+---
+
+ Теоретическая справка
+
+В PostgreSQL роли используются одновременно как пользователи СУБД и как группы привилегий. Роли обладают атрибутами (определяют общие свойства — возможность входа, статус суперпользователя и т.д.) и привилегиями (определяют доступ к конкретным объектам).
+
+Ключевые принципы:
+- Формально роли не связаны с пользователями ОС, хотя многие клиенты по умолчанию используют совпадающие имена
+- При создании кластера инициализируется одна роль-суперпользователь (обычно `postgres`)
+- Аутентификация настраивается в файле `pg_hba.conf`
+- Привилегии выдаются командой `GRANT`, отзываются — `REVOKE`
+
+---
+
+ Задание 1. Создание ролей и проверка атрибутов
+
+ 1.1. Создание роли для пользователя Алисы
+
+```sql
+student@student= CREATE ROLE alice LOGIN PASSWORD 'alice';
+CREATE ROLE
+```
+
+ 1.2. Создание базы данных
+
+```sql
+student@student= CREATE DATABASE access_overview;
+CREATE DATABASE
+
+student@student= \c access_overview
+You are now connected to database "access_overview" as user "student".
+```
+
+ 1.3. Проверка списка ролей
+
+```sql
+access_overview@student= \du
+
+                                   List of roles
+ Role name |                         Attributes                         
+-----------+------------------------------------------------------------
+ alice     | 
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS
+ student   | Superuser, Create role, Create DB, Replication, Bypass RLS
+```
+
+Результат: Роль `student` является суперпользователем — именно поэтому до сих пор мы не задумывались о разграничении доступа.
+
+---
+
+ Задание 2. Подключение к серверу и файл pg_hba.conf
+
+ 2.1. Просмотр расположения pg_hba.conf
+
+```sql
+access_overview@student= SHOW hba_file;
+
+              hba_file              
+------------------------------------
+ /etc/postgresql/16/main/pg_hba.conf
+(1 row)
+```
+
+ 2.2. Чтение правил аутентификации из SQL
+
+```sql
+access_overview@student= SELECT type, database, user_name, address, auth_method 
+FROM pg_hba_file_rules();
+
+ type  |    database    | user_name |  address  | auth_method  
+-------+----------------+-----------+-----------+--------------
+ local | {all}          | {all}     |           | trust
+ host  | {all}          | {all}     | 127.0.0.1 | scram-sha-256
+ host  | {all}          | {all}     | ::1/128   | scram-sha-256
+ local | {replication}  | {all}     |           | trust
+ host  | {replication}  | {all}     | 127.0.0.1 | scram-sha-256
+ host  | {replication}  | {all}     | ::1/128   | scram-sha-256
+(6 rows)
+```
+
+ 2.3. Описание методов аутентификации
+
+| Метод | Описание |
+|-------|----------|
+| `trust` | Безусловно разрешает подключение |
+| `reject` | Безусловно запрещает подключение |
+| `scram-sha-256` | Запрашивает пароль, проверяет по хешу (современный метод) |
+| `md5` | Устаревший парольный метод |
+| `peer` | Спрашивает имя пользователя у ОС, разрешает при совпадении с ролью БД |
+
+ 2.4. Установка пароля для Алисы
+
+```sql
+access_overview@student= ALTER ROLE alice PASSWORD 'alicepass';
+ALTER ROLE
+```
+
+ 2.5. Подключение от имени Алисы через TCP/IP
+
+```bash
+student$ psql 'host=localhost user=alice dbname=access_overview password=alicepass'
+
+alice=> \conninfo
+
+You are connected to database "access_overview" as user "alice" on host "localhost"
+(address "127.0.0.1") at port "5432".
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
+```
+
+Результат: Подключение успешно установлено по TCP/IP с парольной аутентификацией `scram-sha-256`.
+
+---
+
+ Задание 3. Привилегии на объекты
+
+ 3.1. Попытка Алисы создать схему (без привилегий)
+
+```sql
+alice=> CREATE SCHEMA alice;
+ERROR:  permission denied for database access_overview
+```
+
+Результат: У Алисы нет привилегии `CREATE` на базу данных.
+
+ 3.2. Выдача привилегии CREATE на базу данных
+
+```sql
+access_overview@student= GRANT CREATE ON DATABASE access_overview TO alice;
+GRANT
+```
+
+ 3.3. Создание схемы и таблиц Алисой
+
+```sql
+alice=> CREATE SCHEMA alice;
+CREATE SCHEMA
+
+alice=> CREATE TABLE t1(n numeric);
+CREATE TABLE
+
+alice=> INSERT INTO t1 VALUES(1);
+INSERT 0 1
+
+alice=> CREATE TABLE t2(n numeric, who text DEFAULT current_user);
+CREATE TABLE
+
+alice=> INSERT INTO t2(n) VALUES(1);
+INSERT 0 1
+```
+
+ 3.4. Создание роли Боба и попытка доступа
+
+```sql
+access_overview@student= CREATE ROLE bob LOGIN PASSWORD 'bobpass';
+CREATE ROLE
+```
+
+```bash
+student$ psql 'host=localhost user=bob dbname=access_overview password=bobpass'
+
+bob=> SELECT  FROM alice.t1;
+ERROR:  permission denied for schema alice
+LINE 1: SELECT  FROM alice.t1;
+                      ^
+```
+
+ 3.5. Проверка прав на схему
+
+```sql
+alice=> \x \dn+ \x
+
+List of schemas
+-[ RECORD 1 ]-----+---------------------------
+Name              | alice
+Owner             | alice
+Access privileges | 
+Description       | 
+
+-[ RECORD 2 ]-----+-------------------------------------------------
+Name              | public
+Owner             | pg_database_owner
+Access privileges | pg_database_owner=UC/pg_database_owner+
+                  | =U/pg_database_owner
+Description       | standard public schema
+```
+
+Результат: У схемы `alice` нет записей в `Access privileges` — значит, доступ к ней есть только у владельца (Алисы) и суперпользователя. Боб не может даже «войти» в схему.
+
+---
+
+ Задание 4. Выдача привилегий USAGE и SELECT
+
+ 4.1. Выдача USAGE на схему
+
+```sql
+alice=> GRANT USAGE ON SCHEMA alice TO bob;
+GRANT
+```
+
+ 4.2. Выдача SELECT на таблицу
+
+```sql
+alice=> GRANT SELECT ON alice.t1 TO bob;
+GRANT
+```
+
+ 4.3. Проверка доступа Боба
+
+```sql
+bob=> SELECT  FROM alice.t1;
+ n 
+---
+ 1
+(1 row)
+
+bob=> SELECT  FROM alice.t2;
+ERROR:  permission denied for table t2
+```
+
+Результат: Боб получил доступ к `t1`, но к `t2` доступа по-прежнему нет — привилегии выдаются на каждый объект отдельно.
+
+---
+
+ Задание 5. Включение роли в роль (групповые роли)
+
+ 5.1. Создание групповой роли
+
+```sql
+access_overview@student= CREATE ROLE dba NOLOGIN;
+CREATE ROLE
+```
+
+ 5.2. Включение Боба в групповую роль
+
+```sql
+access_overview@student= GRANT dba TO bob;
+GRANT
+```
+
+ 5.3. Проверка членства
+
+```sql
+access_overview@student= \drg
+
+              List of role grants
+ Role name | Member of |  Options  |  Grantor  
+-----------+-----------+-----------+-----------
+ bob       | dba       | INHERIT   | student
+(1 row)
+```
+
+Описание опций:
+- `INHERIT` — привилегии группы наследуются автоматически
+- `SET` — можно явно переключиться на групповую роль через `SET ROLE`
+
+ 5.4. Исключение из роли
+
+```sql
+access_overview@student= REVOKE dba FROM bob;
+REVOKE ROLE
+```
+
+---
+
+ Задание 6. Предопределённые роли
+
+ 6.1. Создание ситуации с недоступной таблицей
+
+```sql
+bob=> SELECT  FROM alice.t2;
+ERROR:  permission denied for table t2
+```
+
+ 6.2. Включение Боба в предопределённую роль pg_read_all_data
+
+```sql
+access_overview@student= GRANT pg_read_all_data TO bob;
+GRANT ROLE
+```
+
+ 6.3. Проверка доступа
+
+```sql
+bob=> SELECT  FROM alice.t2;
+ n  | who  
+----+------
+  1 | alice
+(1 row)
+```
+
+Результат: Роль `pg_read_all_data` даёт доступ на чтение ко всем таблицам, как если бы были выданы `SELECT` на все таблицы и `USAGE` на все схемы.
+
+ 6.4. Отмена привилегии
+
+```sql
+access_overview@student= REVOKE pg_read_all_data FROM bob;
+REVOKE ROLE
+```
+
+---
+
+ Задание 7. Подпрограммы и SECURITY DEFINER
+
+ 7.1. Создание функции Алисой
+
+```sql
+alice=> CREATE FUNCTION foo() RETURNS SETOF t2 AS $$
+  SELECT  FROM t2;
+$$ LANGUAGE sql STABLE;
+CREATE FUNCTION
+```
+
+ 7.2. Вызов функции Бобом (режим SECURITY INVOKER по умолчанию)
+
+```sql
+bob=> SELECT foo();
+ERROR:  permission denied for table t2
+CONTEXT:  SQL function "foo" statement 1
+```
+
+Результат: Функция выполняется с правами вызывающего (Боба), у которого нет доступа к `t2`.
+
+ 7.3. Переключение функции в режим SECURITY DEFINER
+
+```sql
+alice=> ALTER FUNCTION foo() SECURITY DEFINER;
+ALTER FUNCTION
+```
+
+ 7.4. Повторный вызов Бобом
+
+```sql
+bob=> SELECT foo();
+    foo    
+-----------
+ (1,alice)
+(1 row)
+```
+
+Результат: Теперь функция выполняется с правами владельца (Алисы), и Боб получает доступ к данным.
+
+ 7.5. Отзыв привилегии EXECUTE у роли public
+
+```sql
+alice=> REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA alice FROM public;
+REVOKE
+
+bob=> SELECT foo();
+ERROR:  permission denied for function foo
+```
+
+Результат: После отзыва привилегии у `public` Боб больше не может вызывать функцию.
+
+---
+
+ Практика. Настройка привилегий writer/reader
+
+ Шаг 1. Создание базы данных и ролей
+
+```sql
+student@student= CREATE DATABASE access_overview2;
+CREATE DATABASE
+
+student@student= \c access_overview2
+You are now connected to database "access_overview2" as user "student".
+
+access_overview2@student= CREATE USER writer;
+CREATE ROLE
+
+access_overview2@student= CREATE USER reader;
+CREATE ROLE
+```
+
+ Шаг 2. Настройка привилегий на схему public
+
+```sql
+access_overview2@student= REVOKE ALL ON SCHEMA public FROM public;
+REVOKE
+
+access_overview2@student= GRANT ALL ON SCHEMA public TO writer;
+GRANT
+
+access_overview2@student= GRANT USAGE ON SCHEMA public TO reader;
+GRANT
+```
+
+ Шаг 3. Настройка привилегий по умолчанию
+
+```sql
+access_overview2@student= ALTER DEFAULT PRIVILEGES 
+  FOR ROLE writer 
+  IN SCHEMA public 
+  GRANT SELECT ON TABLES TO reader;
+ALTER DEFAULT PRIVILEGES
+```
+
+ Шаг 4. Создание пользовательских ролей
+
+```sql
+access_overview2@student= CREATE ROLE w1 LOGIN IN ROLE writer;
+CREATE ROLE
+
+access_overview2@student= CREATE ROLE r1 LOGIN IN ROLE reader;
+CREATE ROLE
+```
+
+Примечание: Конструкция `IN ROLE` сразу добавляет новую роль в указанную группу. Это эквивалентно двум командам:
+```sql
+CREATE ROLE w1 LOGIN;
+GRANT writer TO w1;
+```
+
+ Шаг 5. Создание таблицы от имени writer
+
+```sql
+access_overview2@student= \c - writer
+You are now connected to database "access_overview2" as user "writer".
+
+access_overview2=> CREATE TABLE t(n integer);
+CREATE TABLE
+```
+
+ Шаг 6. Проверка доступа
+
+Полный доступ у w1:
+
+```sql
+access_overview2=> \c - w1
+You are now connected to database "access_overview2" as user "w1".
+
+access_overview2=> INSERT INTO t VALUES(42);
+INSERT 0 1
+```
+
+Только чтение у r1:
+
+```sql
+access_overview2=> \c - r1
+You are now connected to database "access_overview2" as user "r1".
+
+access_overview2=> SELECT  FROM t;
+ n  
+----
+ 42
+(1 row)
+
+access_overview2=> INSERT INTO t VALUES(100);
+ERROR:  permission denied for table t
+```
+
+Результат: Механизм привилегий по умолчанию работает корректно — роль `reader` автоматически получает `SELECT` на все таблицы, созданные ролью `writer` в схеме `public`.
+
+---
+
+ Практика+. Настройка pg_hba.conf и peer-аутентификация
+
+ Шаг 1. Добавление ролей alice и bob
+
+```sql
+access_overview2@student= \c access_overview
+You are now connected to database "access_overview" as user "student".
+
+access_overview@student= CREATE ROLE alice LOGIN;
+CREATE ROLE
+
+access_overview@student= CREATE ROLE bob LOGIN;
+CREATE ROLE
+```
+
+ Шаг 2. Ограничение использования trust
+
+Редактируем `pg_hba.conf`, разрешая `trust` только для `postgres` и `student`:
+
+```bash
+student$ sudo sed -i 's/^local.all.all.trust.$/local all postgres,student trust\n/' /etc/postgresql/16/main/pg_hba.conf
+```
+
+Проверка:
+
+```sql
+access_overview@student= SELECT type, database, user_name, address, auth_method, error
+FROM pg_hba_file_rules ORDER BY rule_number;
+
+ type  |    database    |   user_name   |  address  | auth_method | error 
+-------+----------------+---------------+-----------+-------------+-------
+ local | {all}          | {postgres,student} |       | trust       | 
+ host  | {all}          | {all}         | 127.0.0.1 | scram-sha-256 | 
+ host  | {all}          | {all}         | ::1/128   | scram-sha-256 | 
+ ...
+(6 rows)
+
+access_overview@student= SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+```
+
+Проверка запрета:
+
+```bash
+student$ psql -l -U alice
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" 
+failed: FATAL:  no pg_hba.conf entry for host "[local]", user "alice", database "postgres", no encryption
+```
+
+ Шаг 3. Добавление peer-аутентификации для alice и bob
+
+```bash
+student$ sudo sed -i '/^local.all.postgres,student.$/a\local all alice,bob peer' /etc/postgresql/16/main/pg_hba.conf
+
+access_overview@student= SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+```
+
+ Шаг 4. Настройка отображения имён (pg_ident.conf)
+
+Чтобы роль `alice` могла подключаться, создав отображение системного пользователя `student` на роль `alice`:
+
+```bash
+student$ sudo bash -c 'echo "stmap student alice" >> /etc/postgresql/16/main/pg_ident.conf'
+```
+
+И обновляем правило в `pg_hba.conf`, указав имя карты:
+
+```
+local all alice,bob peer map=stmap
+```
+
+ Шаг 5. Одно отображение для разных ролей
+
+Содержимое `pg_ident.conf`:
+```
+stmap student alice
+stmap student bob
+```
+
+Результат: Системный пользователь `student` может подключаться как к роли `alice`, так и к роли `bob` через Unix-сокет, используя одну карту отображения `stmap`.
+
+---
+
+ Сводная таблица основных понятий
+
+| Понятие | Описание |
+|---------|----------|
+| Роль | Именованный субъект доступа в PostgreSQL |
+| Атрибуты роли | LOGIN, SUPERUSER, CREATEDB, CREATEROLE и др. |
+| Привилегии | SELECT, INSERT, UPDATE, DELETE, CREATE, USAGE, EXECUTE и др. |
+| Владелец объекта | Имеет полный доступ и может выдавать/отзывать привилегии |
+| Групповая роль | Роль с атрибутом NOLOGIN, используется для объединения привилегий |
+| Псевдороль public | Неявно включает все остальные роли |
+| pg_hba.conf | Файл настройки правил подключения и методов аутентификации |
+| Привилегии по умолчанию | Настраиваются через `ALTER DEFAULT PRIVILEGES` |
+
+---
+
+ Выводы
+
+ Ключевые моменты:
+
+- Правила в pg_hba.conf просматриваются сверху вниз — первое совпадение определяет метод аутентификации
+- Роль public по умолчанию имеет широкие привилегии (подключение к любой БД, выполнение любых функций) — в production это нужно ограничивать
+- Привилегии по умолчанию — мощный механизм для автоматизации выдачи прав в многопользовательских средах
+- SECURITY DEFINER требует осторожности: функция выполняется с правами владельца, что может привести к несанкционированному доступу
+- Атрибуты ролей не наследуются при включении роли в роль — наследуются только привилегии (и только при `INHERIT`)
+- Предопределённые роли позволяют избежать необходимости выдавать привилегии на каждый объект вручную
+
+ Рекомендации:
+
+- В production-среде отзывайте привилегии у public на схемы, функции и подключение к БД
+- Используйте групповые роли для упрощения управления доступом (например, `app_readers`, `app_writers`)
+- Для автоматизации выдачи прав на новые объекты используйте `ALTER DEFAULT PRIVILEGES`
+- Функции с `SECURITY DEFINER` должны тщательно проверять входные данные и явно указывать `search_path`
+- Для аутентификации всегда используйте `scram-sha-256` вместо устаревшего `md5`
+- Избегайте использования `trust` в production — он не проверяет подлинность пользователя
+- Для массового чтения/записи данных используйте предопределённые роли `pg_read_all_data` / `pg_write_all_data` вместо выдачи привилегий на каждый объект
+
+---
+
+
