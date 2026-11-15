@@ -1,0 +1,328 @@
+ Отчет по лабораторной работе: Организация данных. Базы данных и схемы
+
+ Цель работы
+Изучить логическую структуру хранения данных в PostgreSQL (кластер, базы данных, схемы), научиться управлять объектами, настраивать пути поиска (`search_path`) и работать со специальными схемами, включая временные таблицы.
+
+---
+
+ Задание 1. Создание новой базы данных и проверка ее размера
+
+ 1.1. Создание базы данных
+
+```sql
+student@student= CREATE DATABASE data_databases;
+CREATE DATABASE
+```
+
+ 1.2. Подключение к новой базе
+
+```sql
+student@student= \c data_databases
+You are now connected to database "data_databases" as user "student".
+```
+
+ 1.3. Проверка размера базы данных
+
+Используем функцию `pg_database_size` для получения размера в байтах и `pg_size_pretty` для удобного отображения:
+
+```sql
+data_databases@student= SELECT pg_size_pretty(pg_database_size('data_databases'));
+
+ pg_size_pretty 
+----------------
+ 7516 kB
+(1 row)
+```
+
+Запомним текущий размер для последующего сравнения:
+
+```sql
+data_databases@student= SELECT pg_database_size('data_databases') AS oldsize\gset
+```
+
+Результат: Размер пустой базы данных составляет около 7.5 МБ (включая системные объекты и шаблоны).
+
+---
+
+ Задание 2. Работа со схемами и таблицами
+
+ 2.1. Создание схем
+
+Создадим две схемы: одну с именем `app` и вторую с именем, совпадающим с именем текущего пользователя (`student`).
+
+```sql
+data_databases@student= CREATE SCHEMA app;
+CREATE SCHEMA
+
+data_databases@student= CREATE SCHEMA student;
+CREATE SCHEMA
+```
+
+Проверим список схем:
+
+```sql
+data_databases@student= \dn
+
+       List of schemas
+   Name    |  Owner   
+-----------+----------
+ app       | student
+ public    | postgres
+ student   | student
+(3 rows)
+```
+
+ 2.2. Определение схемы по умолчанию
+
+Проверим, в какой схеме будут создаваться объекты при использовании неквалифицированных имен:
+
+```sql
+data_databases@student= SELECT current_schema();
+
+ current_schema 
+----------------
+ student
+(1 row)
+```
+
+Результат: Так как схема `student` существует и находится в `search_path` (через переменную `$user`), новые объекты по умолчанию создаются в ней.
+
+ 2.3. Создание таблиц в разных схемах
+
+Таблицы в схеме `student` (по умолчанию):
+
+```sql
+data_databases@student= CREATE TABLE a(s text);
+CREATE TABLE
+
+data_databases@student= INSERT INTO a VALUES ('student');
+INSERT 0 1
+
+data_databases@student= CREATE TABLE b(s text);
+CREATE TABLE
+
+data_databases@student= INSERT INTO b VALUES ('student');
+INSERT 0 1
+```
+
+Таблицы в схеме `app` (явное указание):
+
+```sql
+data_databases@student= CREATE TABLE app.a(s text);
+CREATE TABLE
+
+data_databases@student= INSERT INTO app.a VALUES ('app');
+INSERT 0 1
+
+data_databases@student= CREATE TABLE app.c(s text);
+CREATE TABLE
+
+data_databases@student= INSERT INTO app.c VALUES ('app');
+INSERT 0 1
+```
+
+ 2.4. Проверка изменения размера базы данных
+
+```sql
+data_databases@student= SELECT pg_size_pretty(pg_database_size('data_databases'));
+
+ pg_size_pretty 
+----------------
+ 7612 kB
+(1 row)
+
+data_databases@student= SELECT pg_database_size('data_databases') AS newsize\gset
+
+data_databases@student= SELECT pg_size_pretty(:newsize::bigint - :oldsize::bigint);
+
+ pg_size_pretty 
+----------------
+ 96 kB
+(1 row)
+```
+
+Результат: После создания таблиц и добавления данных размер базы увеличился незначительно (на 96 КБ), так как данные занимают мало места.
+
+---
+
+ Задание 3. Настройка пути поиска (search_path)
+
+ 3.1. Текущий путь поиска
+
+```sql
+data_databases@student= SHOW search_path;
+
+   search_path   
+-----------------
+ "$user", public
+(1 row)
+```
+
+Переменная `"$user"` подставляется как имя текущей роли (`student`). Поскольку схема `student` существует, она имеет приоритет над `public`. Схема `app` в пути не указана.
+
+ 3.2. Изменение пути поиска для базы данных
+
+Настроим базу данных так, чтобы при подключении путь поиска включал схемы `student` и `app`, причем схема `student` имела приоритет.
+
+```sql
+data_databases@student= ALTER DATABASE data_databases SET search_path = student, app, public;
+ALTER DATABASE
+```
+
+ 3.3. Проверка применения настроек
+
+Переподключимся к базе, чтобы настройки вступили в силу:
+
+```sql
+data_databases@student= \c data_databases
+You are now connected to database "data_databases" as user "student".
+
+data_databases@student= SHOW search_path;
+
+      search_path       
+------------------------
+ student, app, public
+(1 row)
+
+data_databases@student= SELECT current_schemas(true);
+
+    current_schemas     
+------------------------
+ {pg_catalog,student,app,public}
+(1 row)
+```
+
+Результат: Теперь при выполнении запроса `SELECT  FROM a;` сервер сначала поищет таблицу в схеме `student`, затем в `app`.
+
+---
+
+ Задание 4. Работа с временными таблицами
+
+ 4.1. Создание временной таблицы
+
+Временные таблицы видны только в рамках текущего сеанса и автоматически удаляются после его завершения. Они не записываются в WAL.
+
+```sql
+data_databases@student= CREATE TEMP TABLE t_temp(s text);
+CREATE TABLE
+```
+
+ 4.2. Проверка расположения временной таблицы
+
+```sql
+data_databases@student= \dt t_temp
+
+           List of relations
+ Schema   | Name  | Type  | Owner  
+----------+-------+-------+--------
+ pg_temp_3| t_temp| table | student
+(1 row)
+```
+
+Таблица создана в специальной временной схеме `pg_temp_N` (где N — номер сеанса).
+
+ 4.3. Влияние временных таблиц на поиск объектов
+
+Проверим текущий путь поиска с учетом временных схем:
+
+```sql
+data_databases@student= SELECT current_schemas(true);
+
+          current_schemas           
+------------------------------------
+ {pg_temp_3,pg_catalog,student,app,public}
+(1 row)
+```
+
+Временная схема `pg_temp_3` автоматически добавляется в начало пути поиска. Если бы мы создали таблицу с именем `a` во временной схеме, она бы "перекрыла" таблицы `student.a` и `app.a` при обращении по короткому имени.
+
+ 4.4. Доступ к временным и постоянным таблицам
+
+Обращение к временной таблице по короткому имени:
+
+```sql
+data_databases@student= INSERT INTO t_temp VALUES ('temp data');
+INSERT 0 1
+
+data_databases@student= SELECT  FROM t_temp;
+    s    
+---------
+ temp data
+(1 row)
+```
+
+Обращение к постоянной таблице из схемы `app` (так как имена не конфликтуют):
+
+```sql
+data_databases@student= SELECT  FROM app.a;
+ s  
+----
+ app
+(1 row)
+```
+
+ 4.5. Исчезновение временных объектов
+
+Переподключимся к базе (завершим старый сеанс):
+
+```sql
+data_databases@student= \c data_databases
+You are now connected to database "data_databases" as user "student".
+
+data_databases@student= SELECT  FROM t_temp;
+ERROR:  relation "t_temp" does not exist
+LINE 1: SELECT  FROM t_temp;
+                      ^
+```
+
+Результат: Временная таблица была автоматически удалена вместе с завершением предыдущего сеанса.
+
+---
+
+ Задание 5. Настройка параметров базы данных (temp_buffers)
+
+Установим параметр `temp_buffers` (размер памяти для временных таблиц в рамках сеанса) равным 32 МБ для всех новых подключений к этой базе.
+
+```sql
+data_databases@student= ALTER DATABASE data_databases SET temp_buffers = '32MB';
+ALTER DATABASE
+```
+
+Проверка применения после переподключения:
+
+```sql
+data_databases@student= \c data_databases
+You are now connected to database "data_databases" as user "student".
+
+data_databases@student= SHOW temp_buffers;
+
+ temp_buffers 
+--------------
+ 32MB
+(1 row)
+```
+
+Просмотр сохраненных настроек через системное представление:
+
+```sql
+data_databases@student= \drds
+
+                                 List of settings
+     Role     |     Database      |        Settings        
+--------------+-------------------+------------------------
+              | data_databases    | temp_buffers=32MB
+(1 row)
+```
+
+---
+
+ Выводы
+
+
+
+ Ключевые моменты:
+- База данных `template1` используется как шаблон для создания новых баз. Изменения в ней (например, установка расширений) копируются во все новые базы.
+- Переменная `$user` в `search_path` позволяет автоматически использовать схему с именем текущего пользователя, если она существует.
+- Временные таблицы полезны для промежуточных вычислений, но их данные теряются при сбое или отключении.
+- Настройки, заданные через `ALTER DATABASE`, хранятся в системном каталоге `pg_db_role_setting` и применяются при каждом новом подключении.
+
